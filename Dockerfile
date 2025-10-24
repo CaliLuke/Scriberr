@@ -4,7 +4,7 @@
 ########################
 # UI build stage
 ########################
-FROM node:20-alpine AS ui-builder
+FROM node:20 AS ui-builder
 WORKDIR /web
 
 # Install deps and build web/frontend

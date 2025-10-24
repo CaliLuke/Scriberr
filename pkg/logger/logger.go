@@ -1,309 +1,406 @@
 package logger
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
-// Logger wraps slog.Logger with convenience methods
-type Logger struct {
-	*slog.Logger
-}
-
-// LogLevel represents logging levels
-type LogLevel int
-
-const (
-	LevelDebug LogLevel = iota
-	LevelInfo
-	LevelWarn
-	LevelError
-)
+// Field re-exports zapcore.Field so callers don't need to import zap directly.
+type Field = zapcore.Field
 
 var (
-	// Default logger instance
-	defaultLogger *Logger
-	// Current log level
-	currentLevel = LevelInfo
+	defaultLogger *zap.Logger
+	atomicLevel   = zap.NewAtomicLevelAt(zapcore.InfoLevel)
+	mtx           sync.Mutex
 )
 
-// Init initializes the global logger with specified level
+const (
+	defaultLogFile = "data/logs/scriberr.log"
+)
+
+// Init configures the global logger. It is safe to call multiple times; the
+// last call wins and refreshes the logger based on current environment.
 func Init(level string) {
-	// Parse log level from environment or parameter
-	switch strings.ToLower(level) {
-	case "debug":
-		currentLevel = LevelDebug
-	case "info", "":
-		currentLevel = LevelInfo
-	case "warn", "warning":
-		currentLevel = LevelWarn
-	case "error":
-		currentLevel = LevelError
-	default:
-		currentLevel = LevelInfo
+	mtx.Lock()
+	defer mtx.Unlock()
+
+	parsedLevel := zapcore.InfoLevel
+	if level != "" {
+		if err := parsedLevel.Set(strings.ToLower(level)); err != nil {
+			fmt.Fprintf(os.Stderr, "invalid LOG_LEVEL %q, defaulting to INFO: %v\n", level, err)
+			parsedLevel = zapcore.InfoLevel
+		}
+	}
+	atomicLevel.SetLevel(parsedLevel)
+
+	consoleEncoder := zapcore.NewConsoleEncoder(zapcore.EncoderConfig{
+		TimeKey:          "time",
+		LevelKey:         "level",
+		NameKey:          "logger",
+		CallerKey:        "",
+		MessageKey:       "msg",
+		StacktraceKey:    "stack",
+		LineEnding:       zapcore.DefaultLineEnding,
+		EncodeTime:       zapcore.TimeEncoderOfLayout("15:04:05"),
+		EncodeDuration:   zapcore.StringDurationEncoder,
+		EncodeLevel:      capitalPaddedLevelEncoder,
+		ConsoleSeparator: " ",
+	})
+
+	consoleCore := zapcore.NewCore(
+		consoleEncoder,
+		zapcore.Lock(os.Stdout),
+		atomicLevel,
+	)
+
+	cores := []zapcore.Core{consoleCore}
+
+	if fileSyncer := openLogFile(); fileSyncer != nil {
+		jsonEncoder := zapcore.NewJSONEncoder(zapcore.EncoderConfig{
+			TimeKey:        "timestamp",
+			LevelKey:       "level",
+			NameKey:        "logger",
+			CallerKey:      "caller",
+			MessageKey:     "message",
+			StacktraceKey:  "stacktrace",
+			EncodeLevel:    zapcore.LowercaseLevelEncoder,
+			EncodeTime:     zapcore.RFC3339TimeEncoder,
+			EncodeDuration: zapcore.StringDurationEncoder,
+			EncodeCaller:   zapcore.ShortCallerEncoder,
+		})
+		fileCore := zapcore.NewCore(jsonEncoder, fileSyncer, atomicLevel)
+		cores = append(cores, fileCore)
 	}
 
-	// Configure slog level
-	var slogLevel slog.Level
-	switch currentLevel {
-	case LevelDebug:
-		slogLevel = slog.LevelDebug
-	case LevelInfo:
-		slogLevel = slog.LevelInfo
-	case LevelWarn:
-		slogLevel = slog.LevelWarn
-	case LevelError:
-		slogLevel = slog.LevelError
-	}
+	core := zapcore.NewTee(cores...)
 
-	// Create handler with optimized settings
-	opts := &slog.HandlerOptions{
-		Level:     slogLevel,
-		AddSource: false, // Clean logs without source info
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			// Clean timestamp format
-			if a.Key == slog.TimeKey {
-				return slog.Attr{
-					Key:   a.Key,
-					Value: slog.StringValue(a.Value.Time().Format("15:04:05")),
-				}
-			}
-			// Clean level names
-			if a.Key == slog.LevelKey {
-				level := a.Value.Any().(slog.Level)
-				switch level {
-				case slog.LevelDebug:
-					a.Value = slog.StringValue("DEBUG")
-				case slog.LevelInfo:
-					a.Value = slog.StringValue("INFO ")
-				case slog.LevelWarn:
-					a.Value = slog.StringValue("WARN ")
-				case slog.LevelError:
-					a.Value = slog.StringValue("ERROR")
-				}
-			}
-			return a
-		},
-	}
-
-	// Use text handler for clean, readable output
-	handler := slog.NewTextHandler(os.Stdout, opts)
-	defaultLogger = &Logger{slog.New(handler)}
+	defaultLogger = zap.New(core,
+		zap.AddStacktrace(zapcore.ErrorLevel),
+		zap.AddCaller(),
+		zap.AddCallerSkip(1),
+	)
 }
 
-// Get returns the default logger instance
-func Get() *Logger {
+func capitalPaddedLevelEncoder(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+	switch level {
+	case zapcore.InfoLevel:
+		enc.AppendString("INFO ")
+	case zapcore.WarnLevel:
+		enc.AppendString("WARN ")
+	case zapcore.ErrorLevel:
+		enc.AppendString("ERROR")
+	case zapcore.DebugLevel:
+		enc.AppendString("DEBUG")
+	default:
+		enc.AppendString(strings.ToUpper(level.String()))
+	}
+}
+
+func openLogFile() zapcore.WriteSyncer {
+	path := strings.TrimSpace(os.Getenv("LOG_FILE"))
+	if path == "" {
+		path = defaultLogFile
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create log directory %q: %v\n", filepath.Dir(path), err)
+		return nil
+	}
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open log file %q: %v\n", path, err)
+		return nil
+	}
+
+	return zapcore.AddSync(f)
+}
+
+// Sync flushes any buffered log entries.
+func Sync() error {
+	if defaultLogger == nil {
+		return nil
+	}
+	return defaultLogger.Sync()
+}
+
+// SetLevel allows dynamic adjustments at runtime.
+func SetLevel(level zapcore.Level) {
+	atomicLevel.SetLevel(level)
+}
+
+// Level reports the current log level.
+func Level() zapcore.Level {
+	return atomicLevel.Level()
+}
+
+// Get returns the configured logger, initializing it if needed.
+func Get() *zap.Logger {
 	if defaultLogger == nil {
 		Init(os.Getenv("LOG_LEVEL"))
 	}
 	return defaultLogger
 }
 
-// GetLevel returns the current log level
-func GetLevel() LogLevel {
-	return currentLevel
+// With returns a child logger with additional context.
+func With(fields ...Field) *zap.Logger {
+	return Get().With(fields...)
 }
 
-// Convenience methods for common logging patterns
-
-func Debug(msg string, args ...any) {
-	if currentLevel <= LevelDebug {
-		Get().Debug(msg, args...)
-	}
+// Debug logs at DEBUG level.
+func Debug(msg string, fields ...any) {
+	Get().Debug(msg, normalizeFields(fields...)...)
 }
 
-func Info(msg string, args ...any) {
-	if currentLevel <= LevelInfo {
-		Get().Info(msg, args...)
-	}
+// Info logs at INFO level.
+func Info(msg string, fields ...any) {
+	Get().Info(msg, normalizeFields(fields...)...)
 }
 
-func Warn(msg string, args ...any) {
-	if currentLevel <= LevelWarn {
-		Get().Warn(msg, args...)
-	}
+// Warn logs at WARN level.
+func Warn(msg string, fields ...any) {
+	Get().Warn(msg, normalizeFields(fields...)...)
 }
 
-func Error(msg string, args ...any) {
-	if currentLevel <= LevelError {
-		Get().Error(msg, args...)
-	}
+// Error logs at ERROR level.
+func Error(msg string, fields ...any) {
+	Get().Error(msg, normalizeFields(fields...)...)
 }
 
-// WithContext creates a logger with additional context
-func WithContext(key string, value any) *Logger {
-	return &Logger{Get().With(key, value)}
+// Startup provides consistent boot-time logging.
+func Startup(component, message string, fields ...any) {
+	base := []any{"component", component}
+	all := append(base, fields...)
+	Info(message, all...)
 }
 
-// Startup logging for key initialization steps
-func Startup(step, message string, args ...any) {
-	// Simple message at INFO level, technical details at DEBUG
-	if currentLevel <= LevelInfo {
-		Info(message)
-	}
-	if currentLevel <= LevelDebug {
-		Debug("Startup step", append([]any{"step", step, "message", message}, args...)...)
-	}
-}
-
-// Job logging for transcription operations
+// JobStarted records job begin events.
 func JobStarted(jobID, filename, model string, params map[string]any) {
-	// Simple message at INFO, details at DEBUG
-	Info("Transcription started", "file", filename)
-	Debug("Job started with details", 
-		"job_id", jobID, 
-		"file", filename, 
-		"model", model,
-		"params", params)
+	Info("Transcription started",
+		String("job_id", jobID),
+		String("file", filename),
+		String("model", model),
+		Any("params", params),
+	)
 }
 
+// JobCompleted records successful job completion.
 func JobCompleted(jobID string, duration time.Duration, result any) {
-	Info("Transcription completed", "duration", duration.String())
-	Debug("Job completed with details", 
-		"job_id", jobID, 
-		"duration", duration.String(),
-		"result", result)
+	Info("Transcription completed",
+		String("job_id", jobID),
+		Duration("duration", duration),
+		Any("result", result),
+	)
 }
 
+// JobFailed records job failures.
 func JobFailed(jobID string, duration time.Duration, err error) {
-	Error("Transcription failed", "error", err.Error())
-	Debug("Job failed with details", 
-		"job_id", jobID, 
-		"duration", duration.String(),
-		"error", err.Error())
+	Error("Transcription failed",
+		String("job_id", jobID),
+		Duration("duration", duration),
+		ErrorField(err),
+	)
 }
 
-// HTTP request logging - filtered for INFO level
-func HTTPRequest(method, path string, status int, duration time.Duration, userAgent string) {
-	// Skip noisy endpoints at INFO level
-	if currentLevel <= LevelInfo {
-		switch path {
-		case "/api/v1/transcription/list", "/health":
-			// Skip logging frequent status checks at INFO level
-			return
-		}
-		if strings.HasSuffix(path, "/status") || strings.HasSuffix(path, "/track-progress") {
-			// Skip job status polling at INFO level
-			return
-		}
-	}
-	
-	// Log all requests at DEBUG level
-	if currentLevel <= LevelDebug {
-		Debug("API request", 
-			"method", method,
-			"path", path,
-			"status", status,
-			"duration", fmt.Sprintf("%.2fms", float64(duration.Nanoseconds())/1e6),
-			"user_agent", userAgent)
-	}
-}
-
-// Authentication logging
+// AuthEvent tracks authentication events.
 func AuthEvent(event, username, ip string, success bool, details ...any) {
+	base := fieldsToAny([]Field{
+		String("event", event),
+		String("username", username),
+		String("ip", ip),
+		Bool("success", success),
+	})
+	all := append(base, details...)
+
 	if success {
-		Info("User login successful", "username", username)
-		Debug("Auth event details", 
-			append([]any{"event", event, "username", username, "ip", ip, "success", success}, details...)...)
+		Info("User authentication succeeded", all...)
 	} else {
-		Info("User login failed", "username", username, "reason", "invalid_credentials")
-		Debug("Auth event details", 
-			append([]any{"event", event, "username", username, "ip", ip, "success", success}, details...)...)
+		Warn("User authentication failed", all...)
 	}
 }
 
-// Worker operation logger
-func WorkerOperation(workerID int, jobID string, operation string, args ...any) {
-	Debug("Worker operation", 
-		append([]any{"worker_id", workerID, "job_id", jobID, "operation", operation}, args...)...)
+// WorkerOperation logs queue worker lifecycle events at debug level.
+func WorkerOperation(workerID int, jobID string, operation string, details ...any) {
+	base := fieldsToAny([]Field{
+		Int("worker_id", workerID),
+		String("job_id", jobID),
+		String("operation", operation),
+	})
+	Debug("Worker operation", append(base, details...)...)
 }
 
-// Performance logging for debugging
+// Performance emits timing information for instrumentation.
 func Performance(operation string, duration time.Duration, details ...any) {
-	Debug("Performance", 
-		append([]any{"operation", operation, "duration", duration.String()}, details...)...)
+	base := fieldsToAny([]Field{
+		String("operation", operation),
+		Duration("duration", duration),
+		DurationMillis("duration_ms", duration),
+	})
+	Debug("Performance metric", append(base, details...)...)
 }
 
-// GIN middleware for clean HTTP logging
+// HTTPRequest logs generic HTTP request information.
+func HTTPRequest(method, path string, status int, duration time.Duration, userAgent string) {
+	fields := []Field{
+		String("method", method),
+		String("path", path),
+		Int("status", status),
+		DurationMillis("duration_ms", duration),
+	}
+	if userAgent != "" {
+		fields = append(fields, String("user_agent", userAgent))
+	}
+	Info("HTTP request", fieldsToAny(fields)...)
+}
+
+// GinLogger emits structured logs for HTTP requests and attaches a request-scoped logger.
 func GinLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
 		raw := c.Request.URL.RawQuery
+		if raw != "" {
+			path += "?" + raw
+		}
 
-		// Process request
+		reqLogger := With(
+			String("method", c.Request.Method),
+			String("path", path),
+		)
+
+		ctx := WithLogger(c.Request.Context(), reqLogger)
+		c.Request = c.Request.WithContext(ctx)
+
 		c.Next()
 
-		// Calculate request duration
 		duration := time.Since(start)
-
-		// Build path with query string
-		if raw != "" {
-			path = path + "?" + raw
-		}
-
-		// Format log message based on level
-		if currentLevel <= LevelInfo {
-			// Clean format for INFO level, skip noisy endpoints
-			switch {
-			case strings.Contains(path, "/status") || strings.Contains(path, "/track-progress"):
-				return // Skip status polling
-			case path == "/api/v1/transcription/list" || path == "/health":
-				return // Skip frequent list calls
-			}
-		}
-
-		// Log request
 		status := c.Writer.Status()
-		statusColor := getStatusColor(status)
-		
-		if currentLevel <= LevelDebug {
-			// Detailed logging for DEBUG
-			Debug("API request",
-				"method", c.Request.Method,
-				"path", path,
-				"status", status,
-				"duration", fmt.Sprintf("%.2fms", float64(duration.Nanoseconds())/1e6),
-				"ip", c.ClientIP(),
-				"user_agent", c.Request.UserAgent())
-		} else {
-			// Clean format for INFO: "INFO  15:04:05 GET /api/v1/transcription/submit 200 5.13ms"
-			fmt.Printf("INFO  %s %s %s %s%d%s %s\n",
-				time.Now().Format("15:04:05"),
-				c.Request.Method,
-				path,
-				statusColor,
-				status,
-				"\033[0m", // Reset color
-				fmt.Sprintf("%.2fms", float64(duration.Nanoseconds())/1e6))
+
+		fields := []Field{
+			Int("status", status),
+			DurationMillis("duration_ms", duration),
+			String("client_ip", c.ClientIP()),
+		}
+		if size := c.Writer.Size(); size > 0 {
+			fields = append(fields, Int("bytes", size))
+		}
+
+		switch {
+		case status >= 500:
+			reqLogger.Error("HTTP request failed", fields...)
+		case status >= 400:
+			reqLogger.Warn("HTTP request", fields...)
+		default:
+			reqLogger.Info("HTTP request", fields...)
 		}
 	}
 }
 
-// getStatusColor returns ANSI color codes for HTTP status codes
-func getStatusColor(status int) string {
-	switch {
-	case status >= 200 && status < 300:
-		return "\033[32m" // Green
-	case status >= 300 && status < 400:
-		return "\033[33m" // Yellow
-	case status >= 400 && status < 500:
-		return "\033[31m" // Red
-	case status >= 500:
-		return "\033[35m" // Magenta
-	default:
-		return "\033[37m" // White
-	}
+// SetGinOutput suppresses Gin's default logging.
+func SetGinOutput() {
+	gin.DefaultWriter = io.Discard
 }
 
-// SetGinOutput configures GIN to use a custom writer that suppresses default logs
-func SetGinOutput() {
-	// Set GIN to use a discard writer to suppress default logging
-	gin.DefaultWriter = io.Discard
+// ErrorField creates a zap field for an error, handling nil safely.
+func ErrorField(err error) Field {
+	if err == nil {
+		return zap.Skip()
+	}
+	return zap.Error(err)
+}
+
+// Field helpers re-export common zap constructors for convenience.
+func Any(key string, value any) Field   { return zap.Any(key, value) }
+func Bool(key string, value bool) Field { return zap.Bool(key, value) }
+func Duration(key string, value time.Duration) Field {
+	return zap.Duration(key, value)
+}
+func DurationMillis(key string, value time.Duration) Field {
+	return zap.Float64(key, float64(value)/float64(time.Millisecond))
+}
+func Float64(key string, value float64) Field { return zap.Float64(key, value) }
+func Int(key string, value int) Field         { return zap.Int(key, value) }
+func Int64(key string, value int64) Field     { return zap.Int64(key, value) }
+func String(key, value string) Field          { return zap.String(key, value) }
+func Stringer(key string, value fmt.Stringer) Field {
+	return zap.Stringer(key, value)
+}
+func Time(key string, value time.Time) Field { return zap.Time(key, value) }
+
+func fieldsToAny(fields []Field) []any {
+	if len(fields) == 0 {
+		return nil
+	}
+	args := make([]any, len(fields))
+	for i, f := range fields {
+		args[i] = f
+	}
+	return args
+}
+
+// normalizeFields converts a variadic list of fields into zap fields, allowing
+// callers to pass either zap Fields or key/value pairs.
+func normalizeFields(fields ...any) []Field {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	result := make([]Field, 0, len(fields))
+	for i := 0; i < len(fields); i++ {
+		switch v := fields[i].(type) {
+		case Field:
+			result = append(result, v)
+		case string:
+			if i+1 < len(fields) {
+				result = append(result, zap.Any(v, fields[i+1]))
+				i++
+			} else {
+				result = append(result, zap.String(v, "<missing>"))
+			}
+		default:
+			result = append(result, zap.Any(fmt.Sprintf("arg_%d", i), v))
+		}
+	}
+	return result
+}
+
+type contextKey struct{}
+
+// WithLogger stores the provided logger in the context.
+func WithLogger(ctx context.Context, logger *zap.Logger) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, contextKey{}, logger)
+}
+
+// ContextWith returns a new context enriched with the provided fields.
+func ContextWith(ctx context.Context, fields ...Field) context.Context {
+	current := FromContext(ctx)
+	return WithLogger(ctx, current.With(fields...))
+}
+
+// FromContext extracts a logger from the context or returns the global logger.
+func FromContext(ctx context.Context) *zap.Logger {
+	if ctx != nil {
+		if logger, ok := ctx.Value(contextKey{}).(*zap.Logger); ok && logger != nil {
+			return logger
+		}
+	}
+	return Get()
+}
+
+// C returns a context-scoped logger.
+func C(ctx context.Context) *zap.Logger {
+	return FromContext(ctx)
 }

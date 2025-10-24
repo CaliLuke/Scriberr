@@ -53,7 +53,11 @@ func (p *MultiTrackProcessor) ProcessMultiTrackJob(ctx context.Context, jobID st
 	aupTracks, err := p.aupParser.ParseAupFile(*job.AupFilePath)
 	if err != nil {
 		errMsg := err.Error()
-		p.updateMergeStatus(jobID, "failed", &errMsg)
+		if updateErr := p.updateMergeStatus(jobID, "failed", &errMsg); updateErr != nil {
+			logger.Error("Failed to update merge status after AUP parse failure",
+				"job_id", jobID,
+				"error", updateErr)
+		}
 		return fmt.Errorf("failed to parse AUP file: %w", err)
 	}
 
@@ -62,7 +66,11 @@ func (p *MultiTrackProcessor) ProcessMultiTrackJob(ctx context.Context, jobID st
 	// Update MultiTrackFile records with offset information
 	if err := p.updateTrackOffsets(jobID, aupTracks); err != nil {
 		errMsg := err.Error()
-		p.updateMergeStatus(jobID, "failed", &errMsg)
+		if updateErr := p.updateMergeStatus(jobID, "failed", &errMsg); updateErr != nil {
+			logger.Error("Failed to update merge status after track offset failure",
+				"job_id", jobID,
+				"error", updateErr)
+		}
 		return fmt.Errorf("failed to update track offsets: %w", err)
 	}
 
@@ -70,7 +78,11 @@ func (p *MultiTrackProcessor) ProcessMultiTrackJob(ctx context.Context, jobID st
 	var trackFiles []models.MultiTrackFile
 	if err := p.db.Where("transcription_job_id = ?", jobID).Order("track_index").Find(&trackFiles).Error; err != nil {
 		errMsg := err.Error()
-		p.updateMergeStatus(jobID, "failed", &errMsg)
+		if updateErr := p.updateMergeStatus(jobID, "failed", &errMsg); updateErr != nil {
+			logger.Error("Failed to update merge status after fetching track files",
+				"job_id", jobID,
+				"error", updateErr)
+		}
 		return fmt.Errorf("failed to get track files: %w", err)
 	}
 
@@ -98,7 +110,11 @@ func (p *MultiTrackProcessor) ProcessMultiTrackJob(ctx context.Context, jobID st
 
 	if err := p.audioMerger.MergeTracksWithOffsets(ctx, trackInfos, outputPath, progressCallback); err != nil {
 		errMsg := err.Error()
-		p.updateMergeStatus(jobID, "failed", &errMsg)
+		if updateErr := p.updateMergeStatus(jobID, "failed", &errMsg); updateErr != nil {
+			logger.Error("Failed to update merge status after merge failure",
+				"job_id", jobID,
+				"error", updateErr)
+		}
 		return fmt.Errorf("failed to merge audio tracks: %w", err)
 	}
 
@@ -112,7 +128,11 @@ func (p *MultiTrackProcessor) ProcessMultiTrackJob(ctx context.Context, jobID st
 
 	if err := p.db.Model(&models.TranscriptionJob{}).Where("id = ?", jobID).Updates(updates).Error; err != nil {
 		errMsg := err.Error()
-		p.updateMergeStatus(jobID, "failed", &errMsg)
+		if updateErr := p.updateMergeStatus(jobID, "failed", &errMsg); updateErr != nil {
+			logger.Error("Failed to update merge status after job update failure",
+				"job_id", jobID,
+				"error", updateErr)
+		}
 		return fmt.Errorf("failed to update job with merged path: %w", err)
 	}
 
@@ -125,7 +145,7 @@ func (p *MultiTrackProcessor) updateMergeStatus(jobID, status string, errorMsg *
 	updates := map[string]interface{}{
 		"merge_status": status,
 	}
-	
+
 	if errorMsg != nil {
 		updates["merge_error"] = *errorMsg
 	} else {
@@ -167,9 +187,9 @@ func (p *MultiTrackProcessor) updateTrackOffsets(jobID string, aupTracks []audio
 				return fmt.Errorf("failed to update track file %d: %w", trackFile.ID, err)
 			}
 
-			logger.Info("Updated track with AUP info", 
-				"track_id", trackFile.ID, 
-				"filename", originalFilename, 
+			logger.Info("Updated track with AUP info",
+				"track_id", trackFile.ID,
+				"filename", originalFilename,
 				"offset", aupTrack.Offset,
 				"gain", aupTrack.Gain,
 				"pan", aupTrack.Pan,

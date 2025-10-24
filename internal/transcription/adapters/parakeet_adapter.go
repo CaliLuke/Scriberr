@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"scriberr/internal/transcription/interfaces"
@@ -17,6 +18,8 @@ import (
 )
 
 // ParakeetAdapter implements the TranscriptionAdapter interface for NVIDIA Parakeet
+var parakeetEnvMutex sync.Mutex
+
 type ParakeetAdapter struct {
 	*BaseAdapter
 	envPath string
@@ -25,7 +28,7 @@ type ParakeetAdapter struct {
 // NewParakeetAdapter creates a new Parakeet adapter
 func NewParakeetAdapter() *ParakeetAdapter {
 	envPath := "whisperx-env/parakeet"
-	
+
 	capabilities := interfaces.ModelCapabilities{
 		ModelID:            "parakeet",
 		ModelFamily:        "nvidia_parakeet",
@@ -37,11 +40,11 @@ func NewParakeetAdapter() *ParakeetAdapter {
 		RequiresGPU:        false, // Can run on CPU but GPU recommended
 		MemoryRequirement:  4096,  // 4GB recommended
 		Features: map[string]bool{
-			"timestamps":         true,
-			"word_level":         true,
-			"long_form":          true,
-			"attention_context":  true,
-			"high_quality":       true,
+			"timestamps":        true,
+			"word_level":        true,
+			"long_form":         true,
+			"attention_context": true,
+			"high_quality":      true,
 		},
 		Metadata: map[string]string{
 			"engine":      "nvidia_nemo",
@@ -109,7 +112,7 @@ func NewParakeetAdapter() *ParakeetAdapter {
 	}
 
 	baseAdapter := NewBaseAdapter("parakeet", envPath, capabilities, schema)
-	
+
 	adapter := &ParakeetAdapter{
 		BaseAdapter: baseAdapter,
 		envPath:     envPath,
@@ -125,13 +128,16 @@ func (p *ParakeetAdapter) GetSupportedModels() []string {
 
 // PrepareEnvironment sets up the Parakeet environment
 func (p *ParakeetAdapter) PrepareEnvironment(ctx context.Context) error {
+	parakeetEnvMutex.Lock()
+	defer parakeetEnvMutex.Unlock()
+
 	logger.Info("Preparing NVIDIA Parakeet environment", "env_path", p.envPath)
 
 	// Check if environment is already ready (using cache to speed up repeated checks)
 	if CheckEnvironmentReady(p.envPath, "import nemo.collections.asr") {
 		modelPath := filepath.Join(p.envPath, "parakeet-tdt-0.6b-v3.nemo")
 		scriptPath := filepath.Join(p.envPath, "transcribe.py")
-		
+
 		// Check both model and script exist
 		if stat, err := os.Stat(modelPath); err == nil && stat.Size() > 1024*1024 {
 			if _, err := os.Stat(scriptPath); err == nil {
@@ -222,9 +228,9 @@ func (p *ParakeetAdapter) downloadParakeetModel() error {
 	}
 
 	logger.Info("Downloading Parakeet model", "path", modelPath)
-	
+
 	modelURL := "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/main/parakeet-tdt-0.6b-v3.nemo?download=true"
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
@@ -490,14 +496,14 @@ func (p *ParakeetAdapter) Transcribe(ctx context.Context, input interfaces.Audio
 	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
 
 	logger.Info("Executing Parakeet command", "args", strings.Join(args, " "))
-	
+
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.Canceled {
 		return nil, fmt.Errorf("transcription was cancelled")
 	}
 	if err != nil {
 		logger.Error("Parakeet execution failed", "output", string(output), "error", err)
-		return nil, fmt.Errorf("Parakeet execution failed: %w", err)
+		return nil, fmt.Errorf("parakeet execution failed: %w", err)
 	}
 
 	// Parse result
@@ -510,7 +516,7 @@ func (p *ParakeetAdapter) Transcribe(ctx context.Context, input interfaces.Audio
 	result.ModelUsed = "parakeet-tdt-0.6b-v3"
 	result.Metadata = p.CreateDefaultMetadata(params)
 
-	logger.Info("Parakeet transcription completed", 
+	logger.Info("Parakeet transcription completed",
 		"segments", len(result.Segments),
 		"words", len(result.WordSegments),
 		"processing_time", result.ProcessingTime)
@@ -521,7 +527,7 @@ func (p *ParakeetAdapter) Transcribe(ctx context.Context, input interfaces.Audio
 // buildParakeetArgs builds the command arguments for Parakeet
 func (p *ParakeetAdapter) buildParakeetArgs(input interfaces.AudioInput, params map[string]interface{}, tempDir string) ([]string, error) {
 	outputFile := filepath.Join(tempDir, "result.json")
-	
+
 	scriptPath := filepath.Join(p.envPath, "transcribe.py")
 	args := []string{
 		"run", "--native-tls", "--project", p.envPath, "python", scriptPath,
@@ -546,16 +552,16 @@ func (p *ParakeetAdapter) buildParakeetArgs(input interfaces.AudioInput, params 
 // parseResult parses the Parakeet output
 func (p *ParakeetAdapter) parseResult(tempDir string, input interfaces.AudioInput, params map[string]interface{}) (*interfaces.TranscriptResult, error) {
 	resultFile := filepath.Join(tempDir, "result.json")
-	
+
 	data, err := os.ReadFile(resultFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read result file: %w", err)
 	}
 
 	var parakeetResult struct {
-		Transcription     string `json:"transcription"`
-		Language          string `json:"language"`
-		WordTimestamps    []struct {
+		Transcription  string `json:"transcription"`
+		Language       string `json:"language"`
+		WordTimestamps []struct {
 			Word        string  `json:"word"`
 			StartOffset int     `json:"start_offset"`
 			EndOffset   int     `json:"end_offset"`
@@ -578,11 +584,11 @@ func (p *ParakeetAdapter) parseResult(tempDir string, input interfaces.AudioInpu
 
 	// Convert to standard format
 	result := &interfaces.TranscriptResult{
-		Text:       parakeetResult.Transcription,
-		Language:   parakeetResult.Language,
-		Segments:   make([]interfaces.TranscriptSegment, len(parakeetResult.SegmentTimestamps)),
+		Text:         parakeetResult.Transcription,
+		Language:     parakeetResult.Language,
+		Segments:     make([]interfaces.TranscriptSegment, len(parakeetResult.SegmentTimestamps)),
 		WordSegments: make([]interfaces.TranscriptWord, len(parakeetResult.WordTimestamps)),
-		Confidence: 0.0, // Default confidence
+		Confidence:   0.0, // Default confidence
 	}
 
 	// Convert segments
@@ -611,7 +617,7 @@ func (p *ParakeetAdapter) parseResult(tempDir string, input interfaces.AudioInpu
 func (p *ParakeetAdapter) GetEstimatedProcessingTime(input interfaces.AudioInput) time.Duration {
 	// Parakeet is generally faster than WhisperX but slower than real-time
 	baseTime := p.BaseAdapter.GetEstimatedProcessingTime(input)
-	
+
 	// Parakeet typically processes at about 30% of audio duration
 	return time.Duration(float64(baseTime) * 1.5)
 }

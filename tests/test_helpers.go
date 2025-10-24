@@ -50,7 +50,9 @@ func NewTestHelper(t *testing.T, dbName string) *TestHelper {
 	testDB := database.DB
 
 	// Create upload directory
-	os.MkdirAll(cfg.UploadDir, 0755)
+	if err := os.MkdirAll(cfg.UploadDir, 0755); err != nil {
+		t.Fatalf("failed to create upload dir: %v", err)
+	}
 
 	// Initialize auth service
 	authService := auth.NewAuthService(cfg.JWTSecret)
@@ -224,14 +226,4 @@ func stringPtr(s string) *string {
 // Helper function to create int pointer
 func intPtr(i int) *int {
 	return &i
-}
-
-// Helper function to create float pointer
-func floatPtr(f float64) *float64 {
-	return &f
-}
-
-// Helper function to create bool pointer
-func boolPtr(b bool) *bool {
-	return &b
 }

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"scriberr/internal/config"
 	"scriberr/internal/models"
 	"scriberr/internal/transcription/interfaces"
 	"scriberr/internal/transcription/registry"
@@ -21,8 +22,13 @@ func TestModelRegistry(t *testing.T) {
 	}
 
 	diarizationModels := reg.GetDiarizationModels()
-	if len(diarizationModels) == 0 {
-		t.Error("No diarization models registered")
+	env := config.EnvironmentInfo()
+	if env.SupportsNvidiaStack {
+		if len(diarizationModels) == 0 {
+			t.Error("No diarization models registered")
+		}
+	} else if len(diarizationModels) != 0 {
+		t.Errorf("Expected no diarization models on platform %s/%s, got %v", env.OS, env.Arch, diarizationModels)
 	}
 
 	t.Logf("Registered transcription models: %v", transcriptionModels)
@@ -54,6 +60,33 @@ func TestWhisperXAdapter(t *testing.T) {
 		t.Error("No parameter schema returned")
 	}
 
+	// Verify device options include common accelerators
+	var deviceParam interfaces.ParameterSchema
+	for _, param := range schema {
+		if param.Name == "device" {
+			deviceParam = param
+			break
+		}
+	}
+
+	if len(deviceParam.Options) == 0 {
+		t.Fatal("Device parameter missing options")
+	}
+
+	requiredOptions := []string{"cpu", "cuda", "mps", "auto"}
+	for _, opt := range requiredOptions {
+		found := false
+		for _, available := range deviceParam.Options {
+			if available == opt {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Device options missing %q", opt)
+		}
+	}
+
 	// Test parameter validation
 	validParams := map[string]interface{}{
 		"model":      "small",
@@ -78,6 +111,10 @@ func TestWhisperXAdapter(t *testing.T) {
 }
 
 func TestParakeetAdapter(t *testing.T) {
+	if !config.EnvironmentInfo().SupportsNvidiaStack {
+		t.Skip("Parakeet adapter not supported on this platform")
+	}
+
 	reg := registry.GetRegistry()
 
 	// Get Parakeet adapter
@@ -110,6 +147,10 @@ func TestParakeetAdapter(t *testing.T) {
 }
 
 func TestCanaryAdapter(t *testing.T) {
+	if !config.EnvironmentInfo().SupportsNvidiaStack {
+		t.Skip("Canary adapter not supported on this platform")
+	}
+
 	reg := registry.GetRegistry()
 
 	// Get Canary adapter
@@ -147,6 +188,10 @@ func TestCanaryAdapter(t *testing.T) {
 }
 
 func TestPyAnnoteAdapter(t *testing.T) {
+	if !config.EnvironmentInfo().SupportsNvidiaStack {
+		t.Skip("PyAnnote adapter not supported on this platform")
+	}
+
 	reg := registry.GetRegistry()
 
 	// Get PyAnnote adapter
@@ -195,6 +240,10 @@ func TestPyAnnoteAdapter(t *testing.T) {
 }
 
 func TestSortformerAdapter(t *testing.T) {
+	if !config.EnvironmentInfo().SupportsNvidiaStack {
+		t.Skip("Sortformer adapter not supported on this platform")
+	}
+
 	reg := registry.GetRegistry()
 
 	// Get Sortformer adapter
@@ -243,17 +292,19 @@ func TestModelSelection(t *testing.T) {
 	t.Logf("Selected transcription model: %s", modelID)
 
 	// Test selecting best diarization model
-	diarRequirements := interfaces.ModelRequirements{
-		Language: "en",
-		Features: []string{"speaker_detection"},
-	}
+	if config.EnvironmentInfo().SupportsNvidiaStack {
+		diarRequirements := interfaces.ModelRequirements{
+			Language: "en",
+			Features: []string{"speaker_detection"},
+		}
 
-	diarModelID, err := reg.SelectBestDiarizationModel(diarRequirements)
-	if err != nil {
-		t.Fatalf("Failed to select diarization model: %v", err)
-	}
+		diarModelID, err := reg.SelectBestDiarizationModel(diarRequirements)
+		if err != nil {
+			t.Fatalf("Failed to select diarization model: %v", err)
+		}
 
-	t.Logf("Selected diarization model: %s", diarModelID)
+		t.Logf("Selected diarization model: %s", diarModelID)
+	}
 }
 
 func TestUnifiedTranscriptionService(t *testing.T) {
@@ -281,7 +332,7 @@ func TestAudioInputCreation(t *testing.T) {
 
 	// Test creating audio input from a hypothetical file
 	audioPath := "/tmp/test.wav"
-	
+
 	// This will fail since the file doesn't exist, but we can test the structure
 	_, err := service.createAudioInput(audioPath)
 	if err == nil {
@@ -332,7 +383,7 @@ func intPtr(i int) *int {
 // Benchmark tests
 func BenchmarkModelRegistryLookup(b *testing.B) {
 	reg := registry.GetRegistry()
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, err := reg.GetTranscriptionAdapter("whisperx")

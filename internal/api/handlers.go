@@ -38,6 +38,7 @@ type Handler struct {
 	unifiedProcessor    *transcription.UnifiedJobProcessor
 	quickTranscription  *transcription.QuickTranscriptionService
 	multiTrackProcessor *processing.MultiTrackProcessor
+	environment         config.Environment
 }
 
 // NewHandler creates a new handler
@@ -49,6 +50,7 @@ func NewHandler(cfg *config.Config, authService *auth.AuthService, taskQueue *qu
 		unifiedProcessor:    unifiedProcessor,
 		quickTranscription:  quickTranscription,
 		multiTrackProcessor: processing.NewMultiTrackProcessor(),
+		environment:         cfg.Environment,
 	}
 }
 
@@ -696,10 +698,10 @@ func (h *Handler) GetTrackProgress(c *gin.Context) {
 	}
 
 	// Get individual transcripts to see which tracks are completed
-	var individualTranscripts map[string]string
+	individualTranscripts := make(map[string]string)
 	if job.IndividualTranscripts != nil {
-		if err := json.Unmarshal([]byte(*job.IndividualTranscripts), &individualTranscripts); err == nil {
-			// Successfully parsed individual transcripts
+		if err := json.Unmarshal([]byte(*job.IndividualTranscripts), &individualTranscripts); err != nil {
+			logger.Warn("Failed to parse individual transcripts", "job_id", jobID, "error", err)
 		}
 	}
 
@@ -714,7 +716,7 @@ func (h *Handler) GetTrackProgress(c *gin.Context) {
 
 	for _, trackFile := range job.MultiTrackFiles {
 		trackInfo := map[string]interface{}{
-			"track_name": trackFile.FileName,
+			"track_name":  trackFile.FileName,
 			"track_index": trackFile.TrackIndex,
 		}
 
@@ -751,15 +753,15 @@ func (h *Handler) GetTrackProgress(c *gin.Context) {
 	}
 
 	response := gin.H{
-		"job_id": jobID,
+		"job_id":         jobID,
 		"is_multi_track": true,
 		"overall_status": job.Status,
-		"merge_status": job.MergeStatus,
-		"tracks": trackProgress,
+		"merge_status":   job.MergeStatus,
+		"tracks":         trackProgress,
 		"progress": map[string]interface{}{
 			"completed_tracks": completedTracks,
-			"total_tracks": totalTracks,
-			"percentage": progressPercentage,
+			"total_tracks":     totalTracks,
+			"percentage":       progressPercentage,
 		},
 	}
 
@@ -832,11 +834,12 @@ func (h *Handler) SubmitJob(c *gin.Context) {
 	} else {
 		diarize = getFormBoolWithDefault(c, "diarize", false)
 	}
+	defaultDevice := h.environment.DefaultWhisperDevice
 	params := models.WhisperXParams{
 		Model:       getFormValueWithDefault(c, "model", "base"),
 		BatchSize:   getFormIntWithDefault(c, "batch_size", 16),
 		ComputeType: getFormValueWithDefault(c, "compute_type", "int8"),
-		Device:      getFormValueWithDefault(c, "device", "cpu"),
+		Device:      getFormValueWithDefault(c, "device", defaultDevice),
 		VadOnset:    getFormFloatWithDefault(c, "vad_onset", 0.500),
 		VadOffset:   getFormFloatWithDefault(c, "vad_offset", 0.363),
 		Diarize:     diarize,
@@ -1079,11 +1082,12 @@ func (h *Handler) StartTranscription(c *gin.Context) {
 	var requestParams models.WhisperXParams
 
 	// Set defaults
+	defaultDevice := h.environment.DefaultWhisperDevice
 	requestParams = models.WhisperXParams{
 		ModelFamily:                    "whisper", // Default to whisper for backward compatibility
 		Model:                          "small",
 		ModelCacheOnly:                 false,
-		Device:                         "cpu",
+		Device:                         defaultDevice,
 		DeviceIndex:                    0,
 		BatchSize:                      8,
 		ComputeType:                    "float32",
@@ -1128,7 +1132,7 @@ func (h *Handler) StartTranscription(c *gin.Context) {
 	}
 
 	// Debug: log what we received
-	logger.Debug("Parsed transcription parameters", 
+	logger.Debug("Parsed transcription parameters",
 		"job_id", jobID,
 		"model_family", requestParams.ModelFamily,
 		"model", requestParams.Model,
@@ -1198,7 +1202,7 @@ func (h *Handler) StartTranscription(c *gin.Context) {
 	}
 	params["language"] = requestParams.Language
 	params["device"] = requestParams.Device
-	
+
 	filename := filepath.Base(job.AudioPath)
 	logger.JobStarted(jobID, filename, requestParams.ModelFamily, params)
 
@@ -1627,13 +1631,13 @@ func (h *Handler) Login(c *gin.Context) {
 
 	var user models.User
 	if err := database.DB.Where("username = ?", req.Username).First(&user).Error; err != nil {
-		logger.AuthEvent("login", req.Username, c.ClientIP(), false, "user_not_found")
+		logger.AuthEvent("login", req.Username, c.ClientIP(), false, logger.String("reason", "user_not_found"))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
 
 	if !auth.CheckPassword(req.Password, user.Password) {
-		logger.AuthEvent("login", req.Username, c.ClientIP(), false, "invalid_password")
+		logger.AuthEvent("login", req.Username, c.ClientIP(), false, logger.String("reason", "invalid_password"))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}

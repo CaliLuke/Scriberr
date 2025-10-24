@@ -25,7 +25,7 @@ type SortformerAdapter struct {
 // NewSortformerAdapter creates a new NVIDIA Sortformer diarization adapter
 func NewSortformerAdapter() *SortformerAdapter {
 	envPath := "whisperx-env/parakeet" // Shares environment with NVIDIA models
-	
+
 	capabilities := interfaces.ModelCapabilities{
 		ModelID:            "sortformer",
 		ModelFamily:        "nvidia_sortformer",
@@ -44,13 +44,13 @@ func NewSortformerAdapter() *SortformerAdapter {
 			"no_token_required":    true,
 		},
 		Metadata: map[string]string{
-			"engine":        "nvidia_nemo",
-			"framework":     "nemo_toolkit",
-			"license":       "CC-BY-4.0",
-			"optimization":  "4_speakers",
-			"sample_rate":   "16000",
-			"format":        "16khz_mono_wav",
-			"no_auth":       "true",
+			"engine":       "nvidia_nemo",
+			"framework":    "nemo_toolkit",
+			"license":      "CC-BY-4.0",
+			"optimization": "4_speakers",
+			"sample_rate":  "16000",
+			"format":       "16khz_mono_wav",
+			"no_auth":      "true",
 		},
 	}
 
@@ -131,7 +131,7 @@ func NewSortformerAdapter() *SortformerAdapter {
 	}
 
 	baseAdapter := NewBaseAdapter("sortformer", envPath, capabilities, schema)
-	
+
 	adapter := &SortformerAdapter{
 		BaseAdapter: baseAdapter,
 		envPath:     envPath,
@@ -152,6 +152,9 @@ func (s *SortformerAdapter) GetMinSpeakers() int {
 
 // PrepareEnvironment sets up the Sortformer environment (shared with NVIDIA models)
 func (s *SortformerAdapter) PrepareEnvironment(ctx context.Context) error {
+	parakeetEnvMutex.Lock()
+	defer parakeetEnvMutex.Unlock()
+
 	logger.Info("Preparing NVIDIA Sortformer environment", "env_path", s.envPath)
 
 	// Check if environment is already ready (using cache to speed up repeated checks)
@@ -246,9 +249,9 @@ func (s *SortformerAdapter) downloadSortformerModel() error {
 	}
 
 	logger.Info("Downloading Sortformer model", "path", modelPath)
-	
+
 	modelURL := "https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2/resolve/main/diar_streaming_sortformer_4spk-v2.nemo?download=true"
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
@@ -285,7 +288,7 @@ func (s *SortformerAdapter) downloadSortformerModel() error {
 // createDiarizationScript creates the Python script for Sortformer diarization
 func (s *SortformerAdapter) createDiarizationScript() error {
 	scriptPath := filepath.Join(s.envPath, "sortformer_diarize.py")
-	
+
 	// Check if script already exists
 	if _, err := os.Stat(scriptPath); err == nil {
 		return nil
@@ -670,14 +673,14 @@ func (s *SortformerAdapter) Diarize(ctx context.Context, input interfaces.AudioI
 	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
 
 	logger.Info("Executing Sortformer command", "args", strings.Join(args, " "))
-	
+
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.Canceled {
 		return nil, fmt.Errorf("diarization was cancelled")
 	}
 	if err != nil {
 		logger.Error("Sortformer execution failed", "output", string(output), "error", err)
-		return nil, fmt.Errorf("Sortformer execution failed: %w", err)
+		return nil, fmt.Errorf("sortformer execution failed: %w", err)
 	}
 
 	// Parse result
@@ -690,7 +693,7 @@ func (s *SortformerAdapter) Diarize(ctx context.Context, input interfaces.AudioI
 	result.ModelUsed = "diar_streaming_sortformer_4spk-v2"
 	result.Metadata = s.CreateDefaultMetadata(params)
 
-	logger.Info("Sortformer diarization completed", 
+	logger.Info("Sortformer diarization completed",
 		"segments", len(result.Segments),
 		"speakers", result.SpeakerCount,
 		"processing_time", result.ProcessingTime)
@@ -707,7 +710,7 @@ func (s *SortformerAdapter) buildSortformerArgs(input interfaces.AudioInput, par
 	} else {
 		outputFile = filepath.Join(tempDir, "result.rttm")
 	}
-	
+
 	scriptPath := filepath.Join(s.envPath, "sortformer_diarize.py")
 	args := []string{
 		"run", "--native-tls", "--project", s.envPath, "python", scriptPath,
@@ -747,7 +750,7 @@ func (s *SortformerAdapter) buildSortformerArgs(input interfaces.AudioInput, par
 // parseResult parses the Sortformer output
 func (s *SortformerAdapter) parseResult(tempDir string, input interfaces.AudioInput, params map[string]interface{}) (*interfaces.DiarizationResult, error) {
 	outputFormat := s.GetStringParameter(params, "output_format")
-	
+
 	if outputFormat == "json" {
 		return s.parseJSONResult(tempDir)
 	} else {
@@ -758,16 +761,16 @@ func (s *SortformerAdapter) parseResult(tempDir string, input interfaces.AudioIn
 // parseJSONResult parses JSON format output
 func (s *SortformerAdapter) parseJSONResult(tempDir string) (*interfaces.DiarizationResult, error) {
 	resultFile := filepath.Join(tempDir, "result.json")
-	
+
 	data, err := os.ReadFile(resultFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read result file: %w", err)
 	}
 
 	var sortformerResult struct {
-		AudioFile     string `json:"audio_file"`
-		Model         string `json:"model"`
-		Segments      []struct {
+		AudioFile string `json:"audio_file"`
+		Model     string `json:"model"`
+		Segments  []struct {
 			Start      float64 `json:"start"`
 			End        float64 `json:"end"`
 			Speaker    string  `json:"speaker"`
@@ -806,7 +809,7 @@ func (s *SortformerAdapter) parseJSONResult(tempDir string) (*interfaces.Diariza
 // parseRTTMResult parses RTTM format output
 func (s *SortformerAdapter) parseRTTMResult(tempDir string, input interfaces.AudioInput) (*interfaces.DiarizationResult, error) {
 	resultFile := filepath.Join(tempDir, "result.rttm")
-	
+
 	data, err := os.ReadFile(resultFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read result file: %w", err)
@@ -868,7 +871,7 @@ func (s *SortformerAdapter) parseRTTMResult(tempDir string, input interfaces.Aud
 func (s *SortformerAdapter) GetEstimatedProcessingTime(input interfaces.AudioInput) time.Duration {
 	// Sortformer is typically very fast, often faster than real-time
 	baseTime := s.BaseAdapter.GetEstimatedProcessingTime(input)
-	
+
 	// Sortformer typically processes at about 5-10% of audio duration
 	return time.Duration(float64(baseTime) * 0.3)
 }

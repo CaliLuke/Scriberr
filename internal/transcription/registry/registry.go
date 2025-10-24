@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"scriberr/internal/config"
 	"scriberr/internal/transcription/interfaces"
 	"scriberr/pkg/logger"
 )
@@ -26,6 +27,26 @@ type ModelRegistry struct {
 var globalRegistry *ModelRegistry
 var registryOnce sync.Once
 
+func environmentSupportsNvidia() bool {
+	return config.EnvironmentInfo().SupportsNvidiaStack
+}
+
+func shouldSkipTranscriptionAdapter(modelID string) bool {
+	switch modelID {
+	case "parakeet", "canary":
+		return !environmentSupportsNvidia()
+	}
+	return false
+}
+
+func shouldSkipDiarizationAdapter(modelID string) bool {
+	switch modelID {
+	case "sortformer", "pyannote":
+		return !environmentSupportsNvidia()
+	}
+	return false
+}
+
 // GetRegistry returns the global model registry instance
 func GetRegistry() *ModelRegistry {
 	registryOnce.Do(func() {
@@ -36,35 +57,50 @@ func GetRegistry() *ModelRegistry {
 			capabilities:          make(map[string]interfaces.ModelCapabilities),
 		}
 	})
+
 	return globalRegistry
 }
 
 // RegisterTranscriptionAdapter registers a transcription model adapter
 func RegisterTranscriptionAdapter(modelID string, adapter interfaces.TranscriptionAdapter) {
+	if shouldSkipTranscriptionAdapter(modelID) {
+		env := config.EnvironmentInfo()
+		logger.Info("Skipping transcription adapter for unsupported platform",
+			"model_id", modelID, "goos", env.OS, "goarch", env.Arch)
+		return
+	}
+
 	registry := GetRegistry()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 
 	registry.transcriptionAdapters[modelID] = adapter
 	registry.capabilities[modelID] = adapter.GetCapabilities()
-	
-	logger.Debug("Registered transcription adapter", 
-		"model_id", modelID, 
+
+	logger.Debug("Registered transcription adapter",
+		"model_id", modelID,
 		"family", adapter.GetCapabilities().ModelFamily,
 		"display_name", adapter.GetCapabilities().DisplayName)
 }
 
 // RegisterDiarizationAdapter registers a diarization model adapter
 func RegisterDiarizationAdapter(modelID string, adapter interfaces.DiarizationAdapter) {
+	if shouldSkipDiarizationAdapter(modelID) {
+		env := config.EnvironmentInfo()
+		logger.Info("Skipping diarization adapter for unsupported platform",
+			"model_id", modelID, "goos", env.OS, "goarch", env.Arch)
+		return
+	}
+
 	registry := GetRegistry()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 
 	registry.diarizationAdapters[modelID] = adapter
 	registry.capabilities[modelID] = adapter.GetCapabilities()
-	
-	logger.Debug("Registered diarization adapter", 
-		"model_id", modelID, 
+
+	logger.Debug("Registered diarization adapter",
+		"model_id", modelID,
 		"family", adapter.GetCapabilities().ModelFamily,
 		"display_name", adapter.GetCapabilities().DisplayName)
 }
@@ -77,9 +113,9 @@ func RegisterCompositeAdapter(modelID string, adapter interfaces.CompositeAdapte
 
 	registry.compositeAdapters[modelID] = adapter
 	registry.capabilities[modelID] = adapter.GetCapabilities()
-	
-	logger.Debug("Registered composite adapter", 
-		"model_id", modelID, 
+
+	logger.Debug("Registered composite adapter",
+		"model_id", modelID,
 		"family", adapter.GetCapabilities().ModelFamily,
 		"display_name", adapter.GetCapabilities().DisplayName)
 }
@@ -167,7 +203,7 @@ func (r *ModelRegistry) GetTranscriptionModels() []string {
 	for id := range r.compositeAdapters {
 		models = append(models, id)
 	}
-	
+
 	sort.Strings(models)
 	return models
 }
@@ -184,7 +220,7 @@ func (r *ModelRegistry) GetDiarizationModels() []string {
 	for id := range r.compositeAdapters {
 		models = append(models, id)
 	}
-	
+
 	sort.Strings(models)
 	return models
 }
@@ -235,8 +271,8 @@ func (r *ModelRegistry) SelectBestTranscriptionModel(requirements interfaces.Mod
 	})
 
 	bestModel := candidates[0]
-	logger.Info("Selected best transcription model", 
-		"model_id", bestModel.ModelID, 
+	logger.Info("Selected best transcription model",
+		"model_id", bestModel.ModelID,
 		"score", bestModel.Score,
 		"reasons", strings.Join(bestModel.Reasons, ", "))
 
@@ -282,8 +318,8 @@ func (r *ModelRegistry) SelectBestDiarizationModel(requirements interfaces.Model
 	})
 
 	bestModel := candidates[0]
-	logger.Info("Selected best diarization model", 
-		"model_id", bestModel.ModelID, 
+	logger.Info("Selected best diarization model",
+		"model_id", bestModel.ModelID,
 		"score", bestModel.Score,
 		"reasons", strings.Join(bestModel.Reasons, ", "))
 
@@ -355,21 +391,21 @@ func (r *ModelRegistry) scoreModel(capabilities interfaces.ModelCapabilities, re
 	switch requirements.Quality {
 	case "fast":
 		if strings.Contains(strings.ToLower(capabilities.ModelID), "fast") ||
-		   strings.Contains(strings.ToLower(capabilities.ModelID), "tiny") ||
-		   strings.Contains(strings.ToLower(capabilities.ModelID), "small") {
+			strings.Contains(strings.ToLower(capabilities.ModelID), "tiny") ||
+			strings.Contains(strings.ToLower(capabilities.ModelID), "small") {
 			score += 10
 			reasons = append(reasons, "optimized for speed")
 		}
 	case "best":
 		if strings.Contains(strings.ToLower(capabilities.ModelID), "large") ||
-		   strings.Contains(strings.ToLower(capabilities.ModelID), "xl") ||
-		   strings.Contains(strings.ToLower(capabilities.ModelID), "turbo") {
+			strings.Contains(strings.ToLower(capabilities.ModelID), "xl") ||
+			strings.Contains(strings.ToLower(capabilities.ModelID), "turbo") {
 			score += 10
 			reasons = append(reasons, "optimized for quality")
 		}
 	case "good":
 		if strings.Contains(strings.ToLower(capabilities.ModelID), "medium") ||
-		   strings.Contains(strings.ToLower(capabilities.ModelID), "base") {
+			strings.Contains(strings.ToLower(capabilities.ModelID), "base") {
 			score += 10
 			reasons = append(reasons, "balanced quality/speed")
 		}
@@ -396,10 +432,10 @@ func (r *ModelRegistry) InitializeModels(ctx context.Context) error {
 	}
 
 	logger.Info("Initializing registered models in parallel...")
-	
+
 	var wg sync.WaitGroup
 	initErrors := make(chan error, 10) // Buffer for potential errors
-	
+
 	// Initialize transcription adapters in parallel
 	for modelID, adapter := range r.transcriptionAdapters {
 		wg.Add(1)
@@ -407,7 +443,7 @@ func (r *ModelRegistry) InitializeModels(ctx context.Context) error {
 			defer wg.Done()
 			logger.Debug("Initializing transcription model", "model_id", id)
 			if err := adp.PrepareEnvironment(ctx); err != nil {
-				logger.Error("Failed to initialize transcription model", 
+				logger.Error("Failed to initialize transcription model",
 					"model_id", id, "error", err)
 				select {
 				case initErrors <- fmt.Errorf("transcription model %s: %w", id, err):
@@ -426,7 +462,7 @@ func (r *ModelRegistry) InitializeModels(ctx context.Context) error {
 			defer wg.Done()
 			logger.Debug("Initializing diarization model", "model_id", id)
 			if err := adp.PrepareEnvironment(ctx); err != nil {
-				logger.Error("Failed to initialize diarization model", 
+				logger.Error("Failed to initialize diarization model",
 					"model_id", id, "error", err)
 				select {
 				case initErrors <- fmt.Errorf("diarization model %s: %w", id, err):
@@ -445,7 +481,7 @@ func (r *ModelRegistry) InitializeModels(ctx context.Context) error {
 			defer wg.Done()
 			logger.Debug("Initializing composite model", "model_id", id)
 			if err := adp.PrepareEnvironment(ctx); err != nil {
-				logger.Error("Failed to initialize composite model", 
+				logger.Error("Failed to initialize composite model",
 					"model_id", id, "error", err)
 				select {
 				case initErrors <- fmt.Errorf("composite model %s: %w", id, err):
@@ -460,13 +496,13 @@ func (r *ModelRegistry) InitializeModels(ctx context.Context) error {
 	// Wait for all initializations to complete
 	wg.Wait()
 	close(initErrors)
-	
+
 	// Collect any errors (but don't fail completely)
 	var errorList []error
 	for err := range initErrors {
 		errorList = append(errorList, err)
 	}
-	
+
 	if len(errorList) > 0 {
 		logger.Warn("Some models failed to initialize", "error_count", len(errorList))
 		for _, err := range errorList {

@@ -25,7 +25,7 @@ var (
 // CheckEnvironmentReady checks if a UV environment is ready with caching
 func CheckEnvironmentReady(envPath, importStatement string) bool {
 	cacheKey := fmt.Sprintf("%s:%s", envPath, importStatement)
-	
+
 	// Check cache first
 	envCacheMutex.RLock()
 	if ready, exists := envCache[cacheKey]; exists {
@@ -33,16 +33,16 @@ func CheckEnvironmentReady(envPath, importStatement string) bool {
 		return ready
 	}
 	envCacheMutex.RUnlock()
-	
+
 	// Run the actual check
 	testCmd := exec.Command("uv", "run", "--native-tls", "--project", envPath, "python", "-c", importStatement)
 	ready := testCmd.Run() == nil
-	
+
 	// Cache the result
 	envCacheMutex.Lock()
 	envCache[cacheKey] = ready
 	envCacheMutex.Unlock()
-	
+
 	return ready
 }
 
@@ -88,7 +88,7 @@ func (b *BaseAdapter) ValidateParameters(params map[string]interface{}) error {
 	// Check for required parameters
 	for _, paramSchema := range b.schema {
 		value, exists := params[paramSchema.Name]
-		
+
 		if paramSchema.Required && !exists {
 			return fmt.Errorf("required parameter missing: %s", paramSchema.Name)
 		}
@@ -260,7 +260,7 @@ func (b *BaseAdapter) IsReady(ctx context.Context) bool {
 func (b *BaseAdapter) GetEstimatedProcessingTime(input interfaces.AudioInput) time.Duration {
 	// Basic estimation: processing time is typically 10-50% of audio duration
 	// This can be overridden by specific adapters for more accurate estimates
-	
+
 	audioDuration := input.Duration
 	if audioDuration == 0 {
 		// Fallback estimation based on file size (rough approximation)
@@ -379,15 +379,15 @@ func (b *BaseAdapter) CleanupTempDirectory(tempDir string) {
 func (b *BaseAdapter) ConvertAudioFormat(ctx context.Context, input interfaces.AudioInput, targetFormat string, targetSampleRate int) (interfaces.AudioInput, error) {
 	// This is a placeholder for audio conversion functionality
 	// In a real implementation, this would use FFmpeg or similar to convert audio
-	
-	if strings.ToLower(input.Format) == strings.ToLower(targetFormat) && 
-	   (targetSampleRate == 0 || input.SampleRate == targetSampleRate) {
+
+	if strings.EqualFold(input.Format, targetFormat) &&
+		(targetSampleRate == 0 || input.SampleRate == targetSampleRate) {
 		// No conversion needed
 		return input, nil
 	}
 
-	logger.Info("Audio conversion needed", 
-		"from_format", input.Format, 
+	logger.Info("Audio conversion needed",
+		"from_format", input.Format,
 		"to_format", targetFormat,
 		"from_sample_rate", input.SampleRate,
 		"to_sample_rate", targetSampleRate)
@@ -415,7 +415,7 @@ func (b *BaseAdapter) ValidateAudioInput(input interfaces.AudioInput) error {
 			}
 		}
 		if !formatSupported {
-			return fmt.Errorf("audio format %s not supported by model %s. Supported formats: %v", 
+			return fmt.Errorf("audio format %s not supported by model %s. Supported formats: %v",
 				input.Format, b.modelID, b.capabilities.SupportedFormats)
 		}
 	}

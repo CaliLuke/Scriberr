@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -31,7 +32,21 @@ type Config struct {
 	// Python/WhisperX configuration
 	UVPath      string
 	WhisperXEnv string
+
+	// Environment capabilities
+	Environment Environment
 }
+
+// Environment describes host capabilities detected at startup.
+type Environment struct {
+	OS                   string
+	Arch                 string
+	SupportsNvidiaStack  bool
+	SupportsMPS          bool
+	DefaultWhisperDevice string
+}
+
+var environment Environment = detectEnvironment()
 
 // Load loads configuration from environment variables and .env file
 func Load() *Config {
@@ -39,6 +54,8 @@ func Load() *Config {
 	if err := godotenv.Load(); err != nil {
 		logger.Debug("No .env file found, using system environment variables")
 	}
+
+	environment = detectEnvironment()
 
 	return &Config{
 		Port:         getEnv("PORT", "8080"),
@@ -48,33 +65,19 @@ func Load() *Config {
 		UploadDir:    getEnv("UPLOAD_DIR", "data/uploads"),
 		UVPath:       findUVPath(),
 		WhisperXEnv:  getEnv("WHISPERX_ENV", "data/whisperx-env"),
+		Environment:  environment,
 	}
+}
+
+// EnvironmentInfo returns detected environment capabilities.
+func EnvironmentInfo() Environment {
+	return environment
 }
 
 // getEnv gets an environment variable with a default value
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
-	}
-	return defaultValue
-}
-
-// getEnvAsInt gets an environment variable as int with a default value
-func getEnvAsInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intValue, err := strconv.Atoi(value); err == nil {
-			return intValue
-		}
-	}
-	return defaultValue
-}
-
-// getEnvAsBool gets an environment variable as bool with a default value
-func getEnvAsBool(key string, defaultValue bool) bool {
-	if value := os.Getenv(key); value != "" {
-		if boolValue, err := strconv.ParseBool(value); err == nil {
-			return boolValue
-		}
 	}
 	return defaultValue
 }
@@ -116,4 +119,72 @@ func findUVPath() string {
 
 	logger.Warn("UV package manager not found in PATH, using fallback", "fallback", "uv")
 	return "uv"
+}
+
+func detectEnvironment() Environment {
+	goos := runtime.GOOS
+	arch := runtime.GOARCH
+	supportsNvidia := goos == "linux" && arch == "amd64"
+	supportsMPS := goos == "darwin" && arch == "arm64"
+
+	if v := os.Getenv("SCRIBERR_FORCE_NVIDIA"); v != "" {
+		if forced, err := strconv.ParseBool(v); err == nil {
+			supportsNvidia = forced
+		}
+	}
+	if v := os.Getenv("SCRIBERR_DISABLE_NVIDIA"); v != "" {
+		if disabled, err := strconv.ParseBool(v); err == nil && disabled {
+			supportsNvidia = false
+		}
+	}
+	if v := os.Getenv("SCRIBERR_DISABLE_MPS"); v != "" {
+		if disabled, err := strconv.ParseBool(v); err == nil && disabled {
+			supportsMPS = false
+		}
+	}
+
+	defaultDevice := "cpu"
+	if supportsMPS {
+		defaultDevice = "mps"
+	}
+	if override := os.Getenv("SCRIBERR_DEFAULT_DEVICE"); override != "" {
+		switch strings.ToLower(override) {
+		case "cpu", "cuda", "mps", "auto":
+			defaultDevice = strings.ToLower(override)
+		default:
+			logger.Warn("Ignoring invalid SCRIBERR_DEFAULT_DEVICE", "value", override)
+		}
+	}
+
+	return Environment{
+		OS:                   goos,
+		Arch:                 arch,
+		SupportsNvidiaStack:  supportsNvidia,
+		SupportsMPS:          supportsMPS,
+		DefaultWhisperDevice: defaultDevice,
+	}
+}
+
+// Snapshot returns a map view of the loaded configuration suitable for logging.
+func (c *Config) Snapshot() map[string]any {
+	if c == nil {
+		return map[string]any{}
+	}
+
+	return map[string]any{
+		"port":          c.Port,
+		"host":          c.Host,
+		"database_path": c.DatabasePath,
+		"jwt_secret":    c.JWTSecret,
+		"upload_dir":    c.UploadDir,
+		"uv_path":       c.UVPath,
+		"whisperx_env":  c.WhisperXEnv,
+		"environment": map[string]any{
+			"os":                     c.Environment.OS,
+			"arch":                   c.Environment.Arch,
+			"supports_nvidia_stack":  c.Environment.SupportsNvidiaStack,
+			"supports_mps":           c.Environment.SupportsMPS,
+			"default_whisper_device": c.Environment.DefaultWhisperDevice,
+		},
+	}
 }

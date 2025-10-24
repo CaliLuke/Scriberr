@@ -25,7 +25,7 @@ type PyAnnoteAdapter struct {
 // NewPyAnnoteAdapter creates a new PyAnnote diarization adapter
 func NewPyAnnoteAdapter() *PyAnnoteAdapter {
 	envPath := "whisperx-env/parakeet" // Shares environment with NVIDIA models
-	
+
 	capabilities := interfaces.ModelCapabilities{
 		ModelID:            "pyannote",
 		ModelFamily:        "pyannote",
@@ -44,11 +44,11 @@ func NewPyAnnoteAdapter() *PyAnnoteAdapter {
 			"flexible_speakers":   true,
 		},
 		Metadata: map[string]string{
-			"engine":     "pyannote_audio",
-			"framework":  "pytorch",
-			"license":    "MIT",
-			"requires":   "huggingface_token",
-			"model_hub":  "huggingface",
+			"engine":    "pyannote_audio",
+			"framework": "pytorch",
+			"license":   "MIT",
+			"requires":  "huggingface_token",
+			"model_hub": "huggingface",
 		},
 	}
 
@@ -148,7 +148,7 @@ func NewPyAnnoteAdapter() *PyAnnoteAdapter {
 	}
 
 	baseAdapter := NewBaseAdapter("pyannote", envPath, capabilities, schema)
-	
+
 	adapter := &PyAnnoteAdapter{
 		BaseAdapter: baseAdapter,
 		envPath:     envPath,
@@ -169,6 +169,9 @@ func (p *PyAnnoteAdapter) GetMinSpeakers() int {
 
 // PrepareEnvironment sets up the PyAnnote environment (shared with NVIDIA models)
 func (p *PyAnnoteAdapter) PrepareEnvironment(ctx context.Context) error {
+	parakeetEnvMutex.Lock()
+	defer parakeetEnvMutex.Unlock()
+
 	logger.Info("Preparing PyAnnote environment", "env_path", p.envPath)
 
 	// Check if PyAnnote is already available (using cache to speed up repeated checks)
@@ -267,14 +270,14 @@ func (p *PyAnnoteAdapter) addPyAnnoteToEnvironment() error {
 
 	content := string(data)
 	logger.Info("Current pyproject.toml content", "content", content)
-	
+
 	// Check if pyannote.audio is already in dependencies
 	if strings.Contains(content, "pyannote.audio") {
 		logger.Info("pyannote.audio already in dependencies, running sync")
 	} else {
 		// Instead of complex string manipulation, let's recreate the file with pyannote.audio
 		logger.Info("Adding pyannote.audio to dependencies by recreating pyproject.toml")
-		
+
 		// Create updated pyproject.toml with pyannote.audio included
 		updatedContent := `[project]
 name = "parakeet-transcription"
@@ -295,7 +298,7 @@ dependencies = [
 [tool.uv.sources]
 nemo-toolkit = { git = "https://github.com/NVIDIA/NeMo.git" }
 `
-		
+
 		// Write updated pyproject.toml
 		if err := os.WriteFile(pyprojectPath, []byte(updatedContent), 0644); err != nil {
 			return fmt.Errorf("failed to write updated pyproject.toml: %w", err)
@@ -318,7 +321,7 @@ nemo-toolkit = { git = "https://github.com/NVIDIA/NeMo.git" }
 // createDiarizationScript creates the Python script for PyAnnote diarization
 func (p *PyAnnoteAdapter) createDiarizationScript() error {
 	scriptPath := filepath.Join(p.envPath, "pyannote_diarize.py")
-	
+
 	// Check if script already exists
 	if _, err := os.Stat(scriptPath); err == nil {
 		return nil
@@ -599,7 +602,7 @@ func (p *PyAnnoteAdapter) Diarize(ctx context.Context, input interfaces.AudioInp
 	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
 
 	logger.Info("Executing PyAnnote command", "args", strings.Join(args, " "))
-	
+
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.Canceled {
 		return nil, fmt.Errorf("diarization was cancelled")
@@ -619,7 +622,7 @@ func (p *PyAnnoteAdapter) Diarize(ctx context.Context, input interfaces.AudioInp
 	result.ModelUsed = p.GetStringParameter(params, "model")
 	result.Metadata = p.CreateDefaultMetadata(params)
 
-	logger.Info("PyAnnote diarization completed", 
+	logger.Info("PyAnnote diarization completed",
 		"segments", len(result.Segments),
 		"speakers", result.SpeakerCount,
 		"processing_time", result.ProcessingTime)
@@ -636,7 +639,7 @@ func (p *PyAnnoteAdapter) buildPyAnnoteArgs(input interfaces.AudioInput, params 
 	} else {
 		outputFile = filepath.Join(tempDir, "result.rttm")
 	}
-	
+
 	scriptPath := filepath.Join(p.envPath, "pyannote_diarize.py")
 	args := []string{
 		"run", "--native-tls", "--project", p.envPath, "python", scriptPath,
@@ -672,7 +675,7 @@ func (p *PyAnnoteAdapter) buildPyAnnoteArgs(input interfaces.AudioInput, params 
 // parseResult parses the PyAnnote output
 func (p *PyAnnoteAdapter) parseResult(tempDir string, input interfaces.AudioInput, params map[string]interface{}) (*interfaces.DiarizationResult, error) {
 	outputFormat := p.GetStringParameter(params, "output_format")
-	
+
 	if outputFormat == "json" {
 		return p.parseJSONResult(tempDir)
 	} else {
@@ -683,16 +686,16 @@ func (p *PyAnnoteAdapter) parseResult(tempDir string, input interfaces.AudioInpu
 // parseJSONResult parses JSON format output
 func (p *PyAnnoteAdapter) parseJSONResult(tempDir string) (*interfaces.DiarizationResult, error) {
 	resultFile := filepath.Join(tempDir, "result.json")
-	
+
 	data, err := os.ReadFile(resultFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read result file: %w", err)
 	}
 
 	var pyannoteResult struct {
-		AudioFile   string `json:"audio_file"`
-		Model       string `json:"model"`
-		Segments    []struct {
+		AudioFile string `json:"audio_file"`
+		Model     string `json:"model"`
+		Segments  []struct {
 			Start      float64 `json:"start"`
 			End        float64 `json:"end"`
 			Speaker    string  `json:"speaker"`
@@ -730,7 +733,7 @@ func (p *PyAnnoteAdapter) parseJSONResult(tempDir string) (*interfaces.Diarizati
 // parseRTTMResult parses RTTM format output
 func (p *PyAnnoteAdapter) parseRTTMResult(tempDir string, input interfaces.AudioInput) (*interfaces.DiarizationResult, error) {
 	resultFile := filepath.Join(tempDir, "result.rttm")
-	
+
 	data, err := os.ReadFile(resultFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read result file: %w", err)
@@ -792,7 +795,7 @@ func (p *PyAnnoteAdapter) parseRTTMResult(tempDir string, input interfaces.Audio
 func (p *PyAnnoteAdapter) GetEstimatedProcessingTime(input interfaces.AudioInput) time.Duration {
 	// PyAnnote is typically faster than real-time for diarization
 	baseTime := p.BaseAdapter.GetEstimatedProcessingTime(input)
-	
+
 	// PyAnnote typically processes at about 10-15% of audio duration
 	return time.Duration(float64(baseTime) * 0.5)
 }

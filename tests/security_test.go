@@ -30,7 +30,7 @@ type SecurityTestSuite struct {
 	config                    *config.Config
 	authService               *auth.AuthService
 	taskQueue                 *queue.TaskQueue
-	whisperXService           *transcription.WhisperXService
+	unifiedProcessor          *transcription.UnifiedJobProcessor
 	quickTranscriptionService *transcription.QuickTranscriptionService
 	handler                   *api.Handler
 }
@@ -57,20 +57,20 @@ func (suite *SecurityTestSuite) SetupSuite() {
 
 	// Initialize services
 	suite.authService = auth.NewAuthService(suite.config.JWTSecret)
-	suite.whisperXService = transcription.NewWhisperXService(suite.config)
+	suite.unifiedProcessor = transcription.NewUnifiedJobProcessor()
 	var err error
-	suite.quickTranscriptionService, err = transcription.NewQuickTranscriptionService(suite.config, suite.whisperXService)
+	suite.quickTranscriptionService, err = transcription.NewQuickTranscriptionService(suite.config, suite.unifiedProcessor)
 	if err != nil {
 		suite.T().Fatal("Failed to initialize quick transcription service:", err)
 	}
-	suite.taskQueue = queue.NewTaskQueue(1, suite.whisperXService)
-	suite.handler = api.NewHandler(suite.config, suite.authService, suite.taskQueue, suite.whisperXService, suite.quickTranscriptionService)
+	suite.taskQueue = queue.NewTaskQueue(1, suite.unifiedProcessor)
+	suite.handler = api.NewHandler(suite.config, suite.authService, suite.taskQueue, suite.unifiedProcessor, suite.quickTranscriptionService)
 
 	// Set up router
 	suite.router = api.SetupRoutes(suite.handler, suite.authService)
 
 	// Create upload directory
-	os.MkdirAll(suite.config.UploadDir, 0755)
+	assert.NoError(suite.T(), os.MkdirAll(suite.config.UploadDir, 0755))
 }
 
 func (suite *SecurityTestSuite) TearDownSuite() {
@@ -96,7 +96,8 @@ func (suite *SecurityTestSuite) makeUnauthenticatedRequest(method, path string, 
 		case *bytes.Buffer:
 			req, err = http.NewRequest(method, path, v)
 		default:
-			jsonBody, _ := json.Marshal(v)
+			jsonBody, marshalErr := json.Marshal(v)
+			assert.NoError(suite.T(), marshalErr)
 			req, err = http.NewRequest(method, path, bytes.NewBuffer(jsonBody))
 			req.Header.Set("Content-Type", "application/json")
 		}
@@ -118,7 +119,7 @@ func (suite *SecurityTestSuite) makeMultipartRequest(path string, fields map[str
 
 	// Add form fields
 	for key, value := range fields {
-		writer.WriteField(key, value)
+		assert.NoError(suite.T(), writer.WriteField(key, value))
 	}
 
 	// Add file if filename provided
@@ -126,8 +127,9 @@ func (suite *SecurityTestSuite) makeMultipartRequest(path string, fields map[str
 		// Create a dummy file
 		tmpFile, err := os.CreateTemp("", "security_test_*.mp3")
 		assert.NoError(suite.T(), err)
-		tmpFile.WriteString("dummy audio data for security testing")
-		tmpFile.Close()
+		_, err = tmpFile.WriteString("dummy audio data for security testing")
+		assert.NoError(suite.T(), err)
+		assert.NoError(suite.T(), tmpFile.Close())
 		defer os.Remove(tmpFile.Name())
 
 		file, err := os.Open(tmpFile.Name())
@@ -136,10 +138,11 @@ func (suite *SecurityTestSuite) makeMultipartRequest(path string, fields map[str
 
 		part, err := writer.CreateFormFile("audio", filename)
 		assert.NoError(suite.T(), err)
-		io.Copy(part, file)
+		_, err = io.Copy(part, file)
+		assert.NoError(suite.T(), err)
 	}
 
-	writer.Close()
+	assert.NoError(suite.T(), writer.Close())
 
 	req, err := http.NewRequest("POST", path, body)
 	assert.NoError(suite.T(), err)

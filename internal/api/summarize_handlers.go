@@ -11,6 +11,7 @@ import (
 	"scriberr/internal/database"
 	"scriberr/internal/llm"
 	"scriberr/internal/models"
+	"scriberr/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -94,7 +95,9 @@ func (h *Handler) Summarize(c *gin.Context) {
 		select {
 		case chunk, ok := <-contentChan:
 			if !ok {
-				writer.Flush()
+				if err := writer.Flush(); err != nil {
+					logger.Error("Failed to flush summary writer on completion", "transcription_id", req.TranscriptionID, "error", err)
+				}
 				if flusher != nil {
 					flusher.Flush()
 				}
@@ -104,8 +107,16 @@ func (h *Handler) Summarize(c *gin.Context) {
 				return
 			}
 			finalText += chunk
-			writer.WriteString(chunk)
-			writer.Flush()
+			if _, err := writer.WriteString(chunk); err != nil {
+				logger.Error("Failed to stream summary chunk", "transcription_id", req.TranscriptionID, "error", err)
+				persistIfAny()
+				return
+			}
+			if err := writer.Flush(); err != nil {
+				logger.Error("Failed to flush summary chunk", "transcription_id", req.TranscriptionID, "error", err)
+				persistIfAny()
+				return
+			}
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -123,8 +134,12 @@ func (h *Handler) Summarize(c *gin.Context) {
 					resp, err2 := svc.ChatCompletion(ctx, req.Model, messages, 0.0)
 					if err2 != nil || resp == nil || len(resp.Choices) == 0 {
 						log.Printf("[summarize] fallback failed transcription_id=%s model=%s err=%v", req.TranscriptionID, req.Model, err2)
-						c.Writer.Write([]byte("\n"))
-						writer.Flush()
+						if _, writeErr := c.Writer.Write([]byte("\n")); writeErr != nil {
+							logger.Error("Failed to stream summary fallback error newline", "transcription_id", req.TranscriptionID, "error", writeErr)
+						}
+						if err := writer.Flush(); err != nil {
+							logger.Error("Failed to flush summary fallback error", "transcription_id", req.TranscriptionID, "error", err)
+						}
 						if flusher != nil {
 							flusher.Flush()
 						}
@@ -134,8 +149,16 @@ func (h *Handler) Summarize(c *gin.Context) {
 					}
 					content := resp.Choices[0].Message.Content
 					finalText += content
-					writer.WriteString(content)
-					writer.Flush()
+					if _, writeErr := writer.WriteString(content); writeErr != nil {
+						logger.Error("Failed to stream summary fallback chunk", "transcription_id", req.TranscriptionID, "error", writeErr)
+						persistIfAny()
+						return
+					}
+					if err := writer.Flush(); err != nil {
+						logger.Error("Failed to flush summary fallback chunk", "transcription_id", req.TranscriptionID, "error", err)
+						persistIfAny()
+						return
+					}
 					if flusher != nil {
 						flusher.Flush()
 					}
@@ -144,8 +167,12 @@ func (h *Handler) Summarize(c *gin.Context) {
 					log.Printf("[summarize] fallback complete transcription_id=%s model=%s bytes=%d duration_ms=%d", req.TranscriptionID, req.Model, len(finalText), time.Since(start).Milliseconds())
 					return
 				} else {
-					c.Writer.Write([]byte("\n"))
-					writer.Flush()
+					if _, writeErr := c.Writer.Write([]byte("\n")); writeErr != nil {
+						logger.Error("Failed to stream summary error newline", "transcription_id", req.TranscriptionID, "error", writeErr)
+					}
+					if err := writer.Flush(); err != nil {
+						logger.Error("Failed to flush summary error buffer", "transcription_id", req.TranscriptionID, "error", err)
+					}
 					if flusher != nil {
 						flusher.Flush()
 					}

@@ -10,6 +10,7 @@ import (
 	"scriberr/internal/database"
 	"scriberr/internal/llm"
 	"scriberr/internal/models"
+	"scriberr/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -73,12 +74,12 @@ func (h *Handler) getLLMService() (llm.Service, string, error) {
 	switch strings.ToLower(cfg.Provider) {
 	case "openai":
 		if cfg.APIKey == nil || *cfg.APIKey == "" {
-			return nil, cfg.Provider, fmt.Errorf("OpenAI API key not configured")
+			return nil, cfg.Provider, fmt.Errorf("openai API key not configured")
 		}
 		return llm.NewOpenAIService(*cfg.APIKey), cfg.Provider, nil
 	case "ollama":
 		if cfg.BaseURL == nil || *cfg.BaseURL == "" {
-			return nil, cfg.Provider, fmt.Errorf("Ollama base URL not configured")
+			return nil, cfg.Provider, fmt.Errorf("ollama base URL not configured")
 		}
 		return llm.NewOllamaService(*cfg.BaseURL), cfg.Provider, nil
 	default:
@@ -484,7 +485,13 @@ func (h *Handler) SendChatMessage(c *gin.Context) {
 			}
 
 			// Write content to response
-			c.Writer.WriteString(content)
+			if _, writeErr := c.Writer.WriteString(content); writeErr != nil {
+				logger.Error("Failed to stream chat content",
+					"session_id", sessionID,
+					"error", writeErr)
+				c.Writer.Flush()
+				return
+			}
 			c.Writer.Flush()
 			assistantResponse.WriteString(content)
 
@@ -495,12 +502,22 @@ func (h *Handler) SendChatMessage(c *gin.Context) {
 				if strings.Contains(errStr, "\"param\": \"stream\"") || strings.Contains(errStr, "unsupported_value") || strings.Contains(errStr, "must be verified to stream") {
 					resp, err2 := svc.ChatCompletion(ctx, session.Model, openaiMessages, 0.0)
 					if err2 != nil || resp == nil || len(resp.Choices) == 0 {
-						c.Writer.WriteString("\nError: " + err2.Error())
+						if _, writeErr := c.Writer.WriteString("\nError: " + err2.Error()); writeErr != nil {
+							logger.Error("Failed to stream chat fallback error",
+								"session_id", sessionID,
+								"error", writeErr)
+						}
 						c.Writer.Flush()
 						return
 					}
 					content := resp.Choices[0].Message.Content
-					c.Writer.WriteString(content)
+					if _, writeErr := c.Writer.WriteString(content); writeErr != nil {
+						logger.Error("Failed to stream chat fallback response",
+							"session_id", sessionID,
+							"error", writeErr)
+						c.Writer.Flush()
+						return
+					}
 					c.Writer.Flush()
 					assistantResponse.WriteString(content)
 
@@ -525,13 +542,21 @@ func (h *Handler) SendChatMessage(c *gin.Context) {
 				}
 
 				// Otherwise, return the error to the client
-				c.Writer.WriteString("\nError: " + err.Error())
+				if _, writeErr := c.Writer.WriteString("\nError: " + err.Error()); writeErr != nil {
+					logger.Error("Failed to stream chat error",
+						"session_id", sessionID,
+						"error", writeErr)
+				}
 				c.Writer.Flush()
 				return
 			}
 
 		case <-ctx.Done():
-			c.Writer.WriteString("\nRequest timeout")
+			if _, writeErr := c.Writer.WriteString("\nRequest timeout"); writeErr != nil {
+				logger.Error("Failed to stream chat timeout notice",
+					"session_id", sessionID,
+					"error", writeErr)
+			}
 			c.Writer.Flush()
 			return
 		}

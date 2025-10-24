@@ -8,7 +8,7 @@ import (
 	"syscall"
 )
 
-// configureCmdSysProcAttr sets process group on macOS so we can kill children.
-func configureCmdSysProcAttr(cmd *exec.Cmd) {
+// ConfigureCmdSysProcAttr sets process group on macOS so we can kill children.
+func ConfigureCmdSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }

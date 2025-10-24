@@ -25,7 +25,7 @@ type WhisperXAdapter struct {
 // NewWhisperXAdapter creates a new WhisperX adapter
 func NewWhisperXAdapter() *WhisperXAdapter {
 	envPath := "whisperx-env"
-	
+
 	capabilities := interfaces.ModelCapabilities{
 		ModelID:     "whisperx",
 		ModelFamily: "whisper",
@@ -42,22 +42,22 @@ func NewWhisperXAdapter() *WhisperXAdapter {
 			"uz", "fo", "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl", "mg",
 			"as", "tt", "haw", "ln", "ha", "ba", "jw", "su", "auto",
 		},
-		SupportedFormats: []string{"wav", "mp3", "flac", "m4a", "ogg", "wma"},
-		RequiresGPU:      false, // Optional GPU support
-		MemoryRequirement: 2048, // 2GB base requirement
+		SupportedFormats:  []string{"wav", "mp3", "flac", "m4a", "ogg", "wma"},
+		RequiresGPU:       false, // Optional GPU support
+		MemoryRequirement: 2048,  // 2GB base requirement
 		Features: map[string]bool{
-			"timestamps":     true,
-			"word_level":     true,
-			"diarization":    true,
-			"translation":    true,
+			"timestamps":         true,
+			"word_level":         true,
+			"diarization":        true,
+			"translation":        true,
 			"language_detection": true,
-			"vad":            true,
+			"vad":                true,
 		},
 		Metadata: map[string]string{
-			"engine":      "openai_whisper",
-			"framework":   "transformers",
-			"license":     "MIT",
-			"python_env":  "whisperx",
+			"engine":     "openai_whisper",
+			"framework":  "transformers",
+			"license":    "MIT",
+			"python_env": "whisperx",
 		},
 	}
 
@@ -72,14 +72,14 @@ func NewWhisperXAdapter() *WhisperXAdapter {
 			Description: "Whisper model size to use",
 			Group:       "basic",
 		},
-		
+
 		// Device and computation
 		{
 			Name:        "device",
 			Type:        "string",
 			Required:    false,
 			Default:     "cpu",
-			Options:     []string{"cpu", "cuda"},
+			Options:     []string{"cpu", "cuda", "mps", "auto"},
 			Description: "Device to use for computation",
 			Group:       "basic",
 		},
@@ -264,7 +264,7 @@ func NewWhisperXAdapter() *WhisperXAdapter {
 	}
 
 	baseAdapter := NewBaseAdapter("whisperx", filepath.Join(envPath, "WhisperX"), capabilities, schema)
-	
+
 	adapter := &WhisperXAdapter{
 		BaseAdapter: baseAdapter,
 		envPath:     envPath,
@@ -277,7 +277,7 @@ func NewWhisperXAdapter() *WhisperXAdapter {
 func (w *WhisperXAdapter) GetSupportedModels() []string {
 	return []string{
 		"tiny", "tiny.en",
-		"base", "base.en", 
+		"base", "base.en",
 		"small", "small.en",
 		"medium", "medium.en",
 		"large", "large-v1", "large-v2", "large-v3",
@@ -289,7 +289,7 @@ func (w *WhisperXAdapter) PrepareEnvironment(ctx context.Context) error {
 	logger.Info("Preparing WhisperX environment", "env_path", w.envPath)
 
 	whisperxPath := filepath.Join(w.envPath, "WhisperX")
-	
+
 	// Check if WhisperX is already set up and working (using cache to speed up repeated checks)
 	if CheckEnvironmentReady(whisperxPath, "import whisperx") {
 		logger.Info("WhisperX environment already ready")
@@ -406,7 +406,7 @@ func (w *WhisperXAdapter) Transcribe(ctx context.Context, input interfaces.Audio
 	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
 
 	logger.Info("Executing WhisperX command", "args", strings.Join(args, " "))
-	
+
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.Canceled {
 		return nil, fmt.Errorf("transcription was cancelled")
@@ -426,7 +426,7 @@ func (w *WhisperXAdapter) Transcribe(ctx context.Context, input interfaces.Audio
 	result.ModelUsed = w.GetStringParameter(params, "model")
 	result.Metadata = w.CreateDefaultMetadata(params)
 
-	logger.Info("WhisperX transcription completed", 
+	logger.Info("WhisperX transcription completed",
 		"segments", len(result.Segments),
 		"words", len(result.WordSegments),
 		"processing_time", result.ProcessingTime)
@@ -437,7 +437,7 @@ func (w *WhisperXAdapter) Transcribe(ctx context.Context, input interfaces.Audio
 // buildWhisperXArgs builds the command arguments for WhisperX
 func (w *WhisperXAdapter) buildWhisperXArgs(input interfaces.AudioInput, params map[string]interface{}, outputDir string) ([]string, error) {
 	whisperxPath := filepath.Join(w.envPath, "WhisperX")
-	
+
 	args := []string{
 		"run", "--native-tls", "--project", whisperxPath, "python", "-m", "whisperx",
 		input.FilePath,
@@ -450,7 +450,7 @@ func (w *WhisperXAdapter) buildWhisperXArgs(input interfaces.AudioInput, params 
 	args = append(args, "--device_index", strconv.Itoa(w.GetIntParameter(params, "device_index")))
 	args = append(args, "--batch_size", strconv.Itoa(w.GetIntParameter(params, "batch_size")))
 	args = append(args, "--compute_type", w.GetStringParameter(params, "compute_type"))
-	
+
 	if threads := w.GetIntParameter(params, "threads"); threads > 0 {
 		args = append(args, "--threads", strconv.Itoa(threads))
 	}
@@ -473,13 +473,13 @@ func (w *WhisperXAdapter) buildWhisperXArgs(input interfaces.AudioInput, params 
 	// Diarization
 	if w.GetBoolParameter(params, "diarize") {
 		args = append(args, "--diarize")
-		
+
 		diarizeModel := w.GetStringParameter(params, "diarize_model")
 		if diarizeModel == "pyannote" {
 			diarizeModel = "pyannote/speaker-diarization-3.1"
 		}
 		args = append(args, "--diarize_model", diarizeModel)
-		
+
 		if minSpeakers := w.GetIntParameter(params, "min_speakers"); minSpeakers > 0 {
 			args = append(args, "--min_speakers", strconv.Itoa(minSpeakers))
 		}
@@ -519,7 +519,7 @@ func (w *WhisperXAdapter) parseResult(outputDir string, input interfaces.AudioIn
 
 	// Use the first JSON file found
 	resultFile := files[0]
-	
+
 	data, err := os.ReadFile(resultFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read result file: %w", err)
@@ -550,10 +550,10 @@ func (w *WhisperXAdapter) parseResult(outputDir string, input interfaces.AudioIn
 
 	// Convert to standard format
 	result := &interfaces.TranscriptResult{
-		Language:   whisperxResult.Language,
-		Segments:   make([]interfaces.TranscriptSegment, len(whisperxResult.Segments)),
+		Language:     whisperxResult.Language,
+		Segments:     make([]interfaces.TranscriptSegment, len(whisperxResult.Segments)),
 		WordSegments: make([]interfaces.TranscriptWord, len(whisperxResult.Word)),
-		Confidence: 0.0, // WhisperX doesn't provide overall confidence
+		Confidence:   0.0, // WhisperX doesn't provide overall confidence
 	}
 
 	// Convert segments
@@ -593,7 +593,7 @@ func (w *WhisperXAdapter) parseResult(outputDir string, input interfaces.AudioIn
 func (w *WhisperXAdapter) GetEstimatedProcessingTime(input interfaces.AudioInput) time.Duration {
 	// WhisperX processing time varies by model size
 	baseTime := w.BaseAdapter.GetEstimatedProcessingTime(input)
-	
+
 	// Adjust based on model size (if we can determine it)
 	// This would need model size information from parameters
 	// For now, use base estimation

@@ -1,4 +1,4 @@
-import { useState, useEffect, memo } from "react";
+import { useState, useEffect, useMemo, memo } from "react";
 import {
   Dialog,
   DialogContent,
@@ -112,7 +112,7 @@ const PARAM_DESCRIPTIONS = {
   model: "Size of the Whisper model to use. Larger models are more accurate but slower and require more memory.",
   language: "Source language of the audio. Leave as auto-detect for automatic language detection.",
   task: "Whether to transcribe the audio or translate it to English.",
-  device: "Processing device: CPU (slower, universal), GPU (faster, requires CUDA), or Auto (automatic selection).",
+  device: "Processing device: CPU (slower, universal), GPU (CUDA), Metal (MPS for Apple Silicon), or Auto (automatic selection).",
   compute_type: "Precision type: Float16 (faster, less memory), Float32 (more accurate), Int8 (fastest, least accurate).",
   batch_size: "Number of audio segments processed simultaneously. Higher values are faster but use more memory.",
   diarize: "Enable speaker diarization to identify and separate different speakers in the audio.",
@@ -201,6 +201,35 @@ const DEFAULT_PARAMS: WhisperXParams = {
   attention_context_left: 256,
   attention_context_right: 256,
   is_multi_track_enabled: false,
+};
+
+const detectPlatformCapabilities = () => {
+  if (typeof navigator === "undefined") {
+    return {
+      supportsNvidia: true,
+      supportsMps: false,
+      defaultDevice: "cpu" as WhisperXParams["device"],
+    };
+  }
+
+  const ua = navigator.userAgent.toLowerCase();
+  const platform = (navigator.platform || "").toLowerCase();
+  const isLinux = platform.includes("linux") || ua.includes("linux");
+  const isX86_64 = ua.includes("x86_64") || ua.includes("amd64") || ua.includes("x86-64");
+  const isMac = platform.includes("mac") || ua.includes("macintosh");
+  const isAppleSilicon = isMac && (ua.includes("apple m") || ua.includes("arm64") || ua.includes("aarch64"));
+
+  const supportsNvidia = isLinux && isX86_64;
+  const supportsMps = isAppleSilicon;
+  const defaultDevice: WhisperXParams["device"] = supportsMps ? "mps" : "cpu";
+
+  const capabilities = { supportsNvidia, supportsMps, defaultDevice };
+  console.debug("[TranscriptionConfigDialog] Platform detected", {
+    userAgent: ua,
+    platform,
+    capabilities,
+  });
+  return capabilities;
 };
 
 const WHISPER_MODELS = [
@@ -353,15 +382,25 @@ export const TranscriptionConfigDialog = memo(function TranscriptionConfigDialog
   initialDescription = "",
   isMultiTrack = false,
 }: TranscriptionConfigDialogProps) {
-  const [params, setParams] = useState<WhisperXParams>(DEFAULT_PARAMS);
+  const platformCapabilities = useMemo(detectPlatformCapabilities, []);
+  useEffect(() => {
+    console.debug("[TranscriptionConfigDialog] platformCapabilities", platformCapabilities);
+  }, [platformCapabilities]);
+  const baseDefaults = useMemo(() => ({
+    ...DEFAULT_PARAMS,
+    device: platformCapabilities.defaultDevice,
+  }), [platformCapabilities.defaultDevice]);
+
+  const [params, setParams] = useState<WhisperXParams>(baseDefaults);
   const [profileName, setProfileName] = useState("");
   const [profileDescription, setProfileDescription] = useState("");
 
   // Reset to defaults or initial values when dialog opens
   useEffect(() => {
     if (open) {
-      const baseParams = initialParams || DEFAULT_PARAMS;
+      const baseParams = initialParams ? { ...baseDefaults, ...initialParams } : baseDefaults;
       // Auto-set multi-track and diarization based on file type
+      console.debug("[TranscriptionConfigDialog] initializing params", { baseParams, isMultiTrack });
       setParams({
         ...baseParams,
         is_multi_track_enabled: isMultiTrack,
@@ -370,7 +409,30 @@ export const TranscriptionConfigDialog = memo(function TranscriptionConfigDialog
       setProfileName(initialName);
       setProfileDescription(initialDescription);
     }
-  }, [open, initialParams, initialName, initialDescription, isMultiTrack]);
+  }, [open, initialParams, initialName, initialDescription, isMultiTrack, baseDefaults]);
+
+  useEffect(() => {
+    setParams(prev => {
+      let updated = prev;
+      if (!platformCapabilities.supportsNvidia && (prev.model_family === "nvidia_parakeet" || prev.model_family === "nvidia_canary")) {
+        updated = { ...updated, model_family: "whisper" };
+      }
+      if (!platformCapabilities.supportsNvidia && prev.diarize_model === "nvidia_sortformer") {
+        updated = { ...updated, diarize_model: "pyannote" };
+      }
+      const desiredDevice = platformCapabilities.supportsMps ? platformCapabilities.defaultDevice : "cpu";
+      if (!platformCapabilities.supportsNvidia && updated.device === "cuda") {
+        updated = { ...updated, device: desiredDevice };
+      }
+      if (!platformCapabilities.supportsMps && updated.device === "mps") {
+        updated = { ...updated, device: "cpu" };
+      }
+      if (updated !== prev) {
+        console.debug("[TranscriptionConfigDialog] normalized params", { prev, updated, platformCapabilities });
+      }
+      return updated;
+    });
+  }, [platformCapabilities]);
 
   const updateParam = <K extends keyof WhisperXParams>(
     key: K,
@@ -452,18 +514,22 @@ export const TranscriptionConfigDialog = memo(function TranscriptionConfigDialog
                 <SelectItem value="whisper" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
                   Whisper (OpenAI)
                 </SelectItem>
-                <SelectItem value="nvidia_parakeet" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
-                  NVIDIA Parakeet
-                </SelectItem>
-                <SelectItem value="nvidia_canary" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
-                  NVIDIA Canary
-                </SelectItem>
+                {platformCapabilities.supportsNvidia && (
+                  <>
+                    <SelectItem value="nvidia_parakeet" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
+                      NVIDIA Parakeet
+                    </SelectItem>
+                    <SelectItem value="nvidia_canary" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
+                      NVIDIA Canary
+                    </SelectItem>
+                  </>
+                )}
               </SelectContent>
             </Select>
           </div>
         </div>
 
-        {params.model_family === "nvidia_parakeet" ? (
+{platformCapabilities.supportsNvidia && params.model_family === "nvidia_parakeet" ? (
           <div className="space-y-6">
 
             {/* Multi-track status for Parakeet */}
@@ -674,9 +740,11 @@ export const TranscriptionConfigDialog = memo(function TranscriptionConfigDialog
                         <SelectItem value="pyannote" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
                           Pyannote (Recommended) - Requires HF Token
                         </SelectItem>
-                        <SelectItem value="nvidia_sortformer" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
-                          NVIDIA Sortformer - 4 Speakers Max, No Token
-                        </SelectItem>
+                        {platformCapabilities.supportsNvidia && (
+                          <SelectItem value="nvidia_sortformer" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
+                            NVIDIA Sortformer - 4 Speakers Max, No Token
+                          </SelectItem>
+                        )}
                       </SelectContent>
                     </Select>
                   </div>
@@ -704,7 +772,7 @@ export const TranscriptionConfigDialog = memo(function TranscriptionConfigDialog
                     </div>
                   )}
 
-                  {params.diarize_model === "nvidia_sortformer" && (
+                  {platformCapabilities.supportsNvidia && params.diarize_model === "nvidia_sortformer" && (
                     <div className="p-4 border border-orange-200 dark:border-orange-700 rounded-lg bg-orange-50 dark:bg-orange-900/20">
                       <div className="flex items-start gap-3">
                         <div className="text-orange-500 dark:text-orange-400 mt-0.5">⚠️</div>
@@ -725,7 +793,7 @@ export const TranscriptionConfigDialog = memo(function TranscriptionConfigDialog
             </div>
             )}
           </div>
-        ) : params.model_family === "nvidia_canary" ? (
+) : platformCapabilities.supportsNvidia && params.model_family === "nvidia_canary" ? (
           <div className="space-y-6">
 
             {/* Multi-track status for Canary */}
@@ -871,9 +939,11 @@ export const TranscriptionConfigDialog = memo(function TranscriptionConfigDialog
                         <SelectItem value="pyannote" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
                           Pyannote (Recommended) - Requires HF Token
                         </SelectItem>
-                        <SelectItem value="nvidia_sortformer" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
-                          NVIDIA Sortformer - 4 Speakers Max, No Token
-                        </SelectItem>
+                        {platformCapabilities.supportsNvidia && (
+                          <SelectItem value="nvidia_sortformer" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
+                            NVIDIA Sortformer - 4 Speakers Max, No Token
+                          </SelectItem>
+                        )}
                       </SelectContent>
                     </Select>
                   </div>
@@ -901,7 +971,7 @@ export const TranscriptionConfigDialog = memo(function TranscriptionConfigDialog
                     </div>
                   )}
 
-                  {params.diarize_model === "nvidia_sortformer" && (
+                  {platformCapabilities.supportsNvidia && params.diarize_model === "nvidia_sortformer" && (
                     <div className="p-4 border border-orange-200 dark:border-orange-700 rounded-lg bg-orange-50 dark:bg-orange-900/20">
                       <div className="flex items-start gap-3">
                         <div className="text-orange-500 dark:text-orange-400 mt-0.5">⚠️</div>
@@ -1056,7 +1126,12 @@ export const TranscriptionConfigDialog = memo(function TranscriptionConfigDialog
                     </SelectTrigger>
                     <SelectContent className="bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700">
                       <SelectItem value="cpu" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">CPU</SelectItem>
-                      <SelectItem value="cuda" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">GPU (CUDA)</SelectItem>
+                      {platformCapabilities.supportsMps && (
+                        <SelectItem value="mps" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">Metal (Apple MPS)</SelectItem>
+                      )}
+                      {platformCapabilities.supportsNvidia && (
+                        <SelectItem value="cuda" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">GPU (CUDA)</SelectItem>
+                      )}
                       <SelectItem value="auto" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">Auto</SelectItem>
                     </SelectContent>
                   </Select>
@@ -1631,9 +1706,11 @@ export const TranscriptionConfigDialog = memo(function TranscriptionConfigDialog
                         <SelectItem value="pyannote" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
                           Pyannote (Recommended) - Requires HF Token
                         </SelectItem>
-                        <SelectItem value="nvidia_sortformer" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
-                          NVIDIA Sortformer - 4 Speakers Max, No Token
-                        </SelectItem>
+                        {platformCapabilities.supportsNvidia && (
+                          <SelectItem value="nvidia_sortformer" className="text-gray-900 dark:text-gray-100 focus:bg-gray-100 dark:focus:bg-gray-700">
+                            NVIDIA Sortformer - 4 Speakers Max, No Token
+                          </SelectItem>
+                        )}
                       </SelectContent>
                     </Select>
                   </div>
@@ -1712,7 +1789,7 @@ export const TranscriptionConfigDialog = memo(function TranscriptionConfigDialog
                     </div>
                   )}
 
-                  {params.diarize_model === "nvidia_sortformer" && (
+                  {platformCapabilities.supportsNvidia && params.diarize_model === "nvidia_sortformer" && (
                     <div className="p-4 border border-orange-200 dark:border-orange-700 rounded-lg bg-orange-50 dark:bg-orange-900/20">
                       <div className="flex items-start gap-3">
                         <div className="text-orange-500 dark:text-orange-400 mt-0.5">⚠️</div>

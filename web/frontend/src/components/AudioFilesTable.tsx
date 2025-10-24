@@ -154,6 +154,14 @@ export const AudioFilesTable = memo(function AudioFilesTable({
 }: AudioFilesTableProps) {
 	const { navigate } = useRouter();
 	const { getAuthHeaders } = useAuth();
+  useEffect(() => {
+    if (typeof navigator !== "undefined") {
+      console.debug("[AudioFilesTable] user agent", {
+        platform: navigator.platform,
+        userAgent: navigator.userAgent,
+      });
+    }
+  }, []);
 	const [data, setData] = useState<AudioFile[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [isPageChanging, setIsPageChanging] = useState(false);

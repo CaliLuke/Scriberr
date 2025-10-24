@@ -25,19 +25,18 @@ type RunningJob struct {
 
 // TaskQueue manages transcription job processing
 type TaskQueue struct {
-	minWorkers    int
-	maxWorkers    int
+	minWorkers     int
+	maxWorkers     int
 	currentWorkers int64 // Use atomic for thread-safe access
-	jobChannel    chan string
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
-	processor     JobProcessor
-	runningJobs   map[string]*RunningJob
-	jobsMutex     sync.RWMutex
-	workerMutex   sync.Mutex
-	autoScale     bool
-	lastScaleTime time.Time
+	jobChannel     chan string
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	processor      JobProcessor
+	runningJobs    map[string]*RunningJob
+	jobsMutex      sync.RWMutex
+	autoScale      bool
+	lastScaleTime  time.Time
 }
 
 // JobProcessor defines the interface for processing jobs
@@ -56,7 +55,7 @@ type MultiTrackJobProcessor interface {
 // getOptimalWorkerCount calculates optimal worker count based on system resources
 func getOptimalWorkerCount() (min, max int) {
 	numCPU := runtime.NumCPU()
-	
+
 	// Check for environment variable override
 	if workerStr := os.Getenv("QUEUE_WORKERS"); workerStr != "" {
 		if workers, err := strconv.Atoi(workerStr); err == nil && workers > 0 {
@@ -80,7 +79,7 @@ func getOptimalWorkerCount() (min, max int) {
 // NewTaskQueue creates a new task queue with auto-scaling capabilities
 func NewTaskQueue(legacyWorkers int, processor JobProcessor) *TaskQueue {
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	// Calculate optimal worker counts, fallback to legacy parameter
 	min, max := getOptimalWorkerCount()
 	if legacyWorkers > 0 {
@@ -111,10 +110,10 @@ func NewTaskQueue(legacyWorkers int, processor JobProcessor) *TaskQueue {
 // Start starts the task queue workers
 func (tq *TaskQueue) Start() {
 	workers := int(atomic.LoadInt64(&tq.currentWorkers))
-	logger.Debug("Starting task queue", 
-		"workers", workers, 
-		"min_workers", tq.minWorkers, 
-		"max_workers", tq.maxWorkers, 
+	logger.Debug("Starting task queue",
+		"workers", workers,
+		"min_workers", tq.minWorkers,
+		"max_workers", tq.maxWorkers,
 		"auto_scale", tq.autoScale)
 
 	// Start initial workers
@@ -144,7 +143,19 @@ func (tq *TaskQueue) Stop() {
 }
 
 // EnqueueJob adds a job to the queue
-func (tq *TaskQueue) EnqueueJob(jobID string) error {
+func (tq *TaskQueue) EnqueueJob(jobID string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("queue is shutting down")
+		}
+	}()
+
+	select {
+	case <-tq.ctx.Done():
+		return fmt.Errorf("queue is shutting down")
+	default:
+	}
+
 	select {
 	case tq.jobChannel <- jobID:
 		return nil
@@ -209,16 +220,26 @@ func (tq *TaskQueue) worker(id int) {
 			if err != nil {
 				if jobCtx.Err() == context.Canceled {
 					logger.Info("Job cancelled", "worker_id", id, "job_id", jobID)
-					tq.updateJobStatus(jobID, models.StatusFailed)
-					tq.updateJobError(jobID, "Job was cancelled by user")
+					if err := tq.updateJobStatus(jobID, models.StatusFailed); err != nil {
+						logger.Error("Failed to mark cancelled job as failed", "worker_id", id, "job_id", jobID, "error", err)
+					}
+					if err := tq.updateJobError(jobID, "Job was cancelled by user"); err != nil {
+						logger.Error("Failed to record cancellation error", "worker_id", id, "job_id", jobID, "error", err)
+					}
 				} else {
 					logger.Error("Job processing failed", "worker_id", id, "job_id", jobID, "error", err)
-					tq.updateJobStatus(jobID, models.StatusFailed)
-					tq.updateJobError(jobID, err.Error())
+					if statusErr := tq.updateJobStatus(jobID, models.StatusFailed); statusErr != nil {
+						logger.Error("Failed to mark job as failed after error", "worker_id", id, "job_id", jobID, "error", statusErr)
+					}
+					if updateErr := tq.updateJobError(jobID, err.Error()); updateErr != nil {
+						logger.Error("Failed to record job error", "worker_id", id, "job_id", jobID, "error", updateErr)
+					}
 				}
 			} else {
 				logger.Debug("Job processed successfully", "worker_id", id, "job_id", jobID)
-				tq.updateJobStatus(jobID, models.StatusCompleted)
+				if err := tq.updateJobStatus(jobID, models.StatusCompleted); err != nil {
+					logger.Error("Failed to mark job as completed", "worker_id", id, "job_id", jobID, "error", err)
+				}
 			}
 
 		case <-tq.ctx.Done():
@@ -257,13 +278,14 @@ func (tq *TaskQueue) scanPendingJobs() {
 		return
 	}
 
+enqueueLoop:
 	for _, job := range jobs {
 		select {
 		case tq.jobChannel <- job.ID:
 			logger.Debug("Enqueued pending job", "job_id", job.ID)
 		default:
 			logger.Warn("Queue full, skipping job", "job_id", job.ID)
-			break
+			break enqueueLoop
 		}
 	}
 }
@@ -283,7 +305,7 @@ func (tq *TaskQueue) KillJob(jobID string) error {
 	// Check if this is a multi-track job and handle accordingly
 	if mtProcessor, ok := tq.processor.(MultiTrackJobProcessor); ok && mtProcessor.IsMultiTrackJob(jobID) {
 		logger.Debug("Terminating multi-track job", "job_id", jobID)
-		
+
 		// Terminate all individual track jobs
 		if err := mtProcessor.TerminateMultiTrackJob(jobID); err != nil {
 			logger.Error("Failed to terminate multi-track job", "job_id", jobID, "error", err)
@@ -304,8 +326,12 @@ func (tq *TaskQueue) KillJob(jobID string) error {
 
 	// Immediately update job status without waiting for process to finish
 	go func() {
-		tq.updateJobStatus(jobID, models.StatusFailed)
-		tq.updateJobError(jobID, "Job was forcefully terminated by user")
+		if err := tq.updateJobStatus(jobID, models.StatusFailed); err != nil {
+			logger.Error("Failed to mark killed job as failed", "job_id", jobID, "error", err)
+		}
+		if err := tq.updateJobError(jobID, "Job was forcefully terminated by user"); err != nil {
+			logger.Error("Failed to record forced termination error", "job_id", jobID, "error", err)
+		}
 	}()
 
 	return nil
@@ -373,7 +399,7 @@ func (tq *TaskQueue) checkAndScale() {
 
 	queueSize := len(tq.jobChannel)
 	currentWorkers := int(atomic.LoadInt64(&tq.currentWorkers))
-	
+
 	tq.jobsMutex.RLock()
 	runningJobsCount := len(tq.runningJobs)
 	tq.jobsMutex.RUnlock()
@@ -382,22 +408,22 @@ func (tq *TaskQueue) checkAndScale() {
 	if queueSize > 10 && currentWorkers < tq.maxWorkers {
 		newWorkerCount := currentWorkers + 1
 		log.Printf("Scaling up workers: %d -> %d (queue size: %d)", currentWorkers, newWorkerCount, queueSize)
-		
+
 		atomic.StoreInt64(&tq.currentWorkers, int64(newWorkerCount))
 		tq.wg.Add(1)
 		go tq.worker(newWorkerCount - 1)
 		tq.lastScaleTime = time.Now()
-		
-	// Scale down if queue is empty and minimal jobs running
+
+		// Scale down if queue is empty and minimal jobs running
 	} else if queueSize == 0 && runningJobsCount <= 1 && currentWorkers > tq.minWorkers {
 		newWorkerCount := currentWorkers - 1
-		log.Printf("Scaling down workers: %d -> %d (queue size: %d, running: %d)", 
+		log.Printf("Scaling down workers: %d -> %d (queue size: %d, running: %d)",
 			currentWorkers, newWorkerCount, queueSize, runningJobsCount)
-		
+
 		atomic.StoreInt64(&tq.currentWorkers, int64(newWorkerCount))
 		tq.lastScaleTime = time.Now()
-		
-		// Note: We don't actively stop workers here. They will naturally exit 
+
+		// Note: We don't actively stop workers here. They will naturally exit
 		// when no more jobs are available and the queue empties.
 	}
 }
@@ -416,16 +442,16 @@ func (tq *TaskQueue) GetQueueStats() map[string]interface{} {
 	tq.jobsMutex.RUnlock()
 
 	return map[string]interface{}{
-		"queue_size":       len(tq.jobChannel),
-		"queue_capacity":   cap(tq.jobChannel),
-		"current_workers":  int(atomic.LoadInt64(&tq.currentWorkers)),
-		"min_workers":      tq.minWorkers,
-		"max_workers":      tq.maxWorkers,
-		"auto_scale":       tq.autoScale,
-		"running_jobs":     runningJobsCount,
-		"pending_jobs":     pendingCount,
-		"processing_jobs":  processingCount,
-		"completed_jobs":   completedCount,
-		"failed_jobs":      failedCount,
+		"queue_size":      len(tq.jobChannel),
+		"queue_capacity":  cap(tq.jobChannel),
+		"current_workers": int(atomic.LoadInt64(&tq.currentWorkers)),
+		"min_workers":     tq.minWorkers,
+		"max_workers":     tq.maxWorkers,
+		"auto_scale":      tq.autoScale,
+		"running_jobs":    runningJobsCount,
+		"pending_jobs":    pendingCount,
+		"processing_jobs": processingCount,
+		"completed_jobs":  completedCount,
+		"failed_jobs":     failedCount,
 	}
 }

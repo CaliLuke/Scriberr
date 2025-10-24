@@ -58,7 +58,9 @@ func (suite *LLMTestSuite) handleModelsRequest(w http.ResponseWriter, r *http.Re
 	auth := r.Header.Get("Authorization")
 	if auth != "Bearer test-api-key" {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error": {"message": "Invalid API key"}}`))
+		if _, err := w.Write([]byte(`{"error": {"message": "Invalid API key"}}`)); err != nil {
+			suite.T().Logf("failed to write models error response: %v", err)
+		}
 		return
 	}
 
@@ -77,7 +79,9 @@ func (suite *LLMTestSuite) handleModelsRequest(w http.ResponseWriter, r *http.Re
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		suite.T().Logf("failed to encode models response: %v", err)
+	}
 }
 
 func (suite *LLMTestSuite) handleChatCompletionRequest(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +89,9 @@ func (suite *LLMTestSuite) handleChatCompletionRequest(w http.ResponseWriter, r 
 	auth := r.Header.Get("Authorization")
 	if auth != "Bearer test-api-key" {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error": {"message": "Invalid API key"}}`))
+		if _, err := w.Write([]byte(`{"error": {"message": "Invalid API key"}}`)); err != nil {
+			suite.T().Logf("failed to write chat auth error: %v", err)
+		}
 		return
 	}
 
@@ -93,7 +99,9 @@ func (suite *LLMTestSuite) handleChatCompletionRequest(w http.ResponseWriter, r 
 	var chatReq llm.ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&chatReq); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error": {"message": "Invalid request"}}`))
+		if _, writeErr := w.Write([]byte(`{"error": {"message": "Invalid request"}}`)); writeErr != nil {
+			suite.T().Logf("failed to write chat decode error: %v", writeErr)
+		}
 		return
 	}
 
@@ -142,7 +150,9 @@ func (suite *LLMTestSuite) handleNonStreamingResponse(w http.ResponseWriter, cha
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		suite.T().Logf("failed to encode chat completion response: %v", err)
+	}
 }
 
 func (suite *LLMTestSuite) handleStreamingResponse(w http.ResponseWriter, chatReq llm.ChatRequest) {
@@ -180,15 +190,23 @@ func (suite *LLMTestSuite) handleStreamingResponse(w http.ResponseWriter, chatRe
 			},
 		}
 
-		chunkJSON, _ := json.Marshal(streamChunk)
-		w.Write([]byte("data: " + string(chunkJSON) + "\n\n"))
+		chunkJSON, err := json.Marshal(streamChunk)
+		if err != nil {
+			suite.T().Logf("failed to marshal stream chunk: %v", err)
+			continue
+		}
+		if _, writeErr := w.Write([]byte("data: " + string(chunkJSON) + "\n\n")); writeErr != nil {
+			suite.T().Logf("failed to write stream chunk: %v", writeErr)
+		}
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
 	}
 
 	// Send final chunk
-	w.Write([]byte("data: [DONE]\n\n"))
+	if _, err := w.Write([]byte("data: [DONE]\n\n")); err != nil {
+		suite.T().Logf("failed to write stream done chunk: %v", err)
+	}
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
