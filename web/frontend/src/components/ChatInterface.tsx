@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useCallback, memo } from "react";
+import { useState, useEffect, useRef, useCallback, memo, useMemo } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Send, Bot, User, MessageCircle, Copy, Check } from "lucide-react";
 import ReactMarkdown from 'react-markdown'
 import remarkMath from 'remark-math'
@@ -7,33 +8,20 @@ import rehypeRaw from 'rehype-raw'
 import rehypeHighlight from 'rehype-highlight'
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import { useAuth } from "../contexts/AuthContext";
 import { useChatEvents } from "../contexts/ChatEventsContext";
 import { useToast } from "./ui/toast";
-
-interface ChatSession {
-  id: string;
-  transcription_id: string;
-  title: string;
-  model: string;
-  is_active: boolean;
-  created_at: string;
-  updated_at: string;
-  message_count: number;
-  last_message?: {
-    id: number;
-    role: string;
-    content: string;
-    created_at: string;
-  };
-}
-
-interface ChatMessage {
-  id: number;
-  role: "user" | "assistant";
-  content: string;
-  created_at: string;
-}
+import {
+  ChatMessage,
+  ChatSessionDetail,
+  ChatSessionSummary,
+  chatModelsQueryKey,
+  chatSessionDetailQueryKey,
+  chatSessionsQueryKey,
+  fetchChatModels,
+  fetchChatSessionDetail,
+  fetchChatSessions,
+} from "@/hooks/chatQueries";
+import { ApiError } from "@/lib/api";
 
 interface ChatInterfaceProps {
   transcriptionId: string;
@@ -44,21 +32,88 @@ interface ChatInterfaceProps {
 }
 
 export const ChatInterface = memo(function ChatInterface({ transcriptionId, activeSessionId, onSessionChange }: ChatInterfaceProps) {
-  const { getAuthHeaders } = useAuth();
+  const queryClient = useQueryClient();
   const { emitSessionTitleUpdated, emitTitleGenerating } = useChatEvents();
   const { toast } = useToast();
-  const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [activeSession, setActiveSession] = useState<ChatSession | null>(null);
+  const [internalSessionId, setInternalSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [streamingMessage, setStreamingMessage] = useState("");
-  const [selectedModel, setSelectedModel] = useState("gpt-3.5-turbo");
   const [error, setError] = useState<string | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useQuery({
+    queryKey: chatModelsQueryKey,
+    queryFn: fetchChatModels,
+    onError: err => {
+      const message = err instanceof ApiError ? err.message : "Failed to load models";
+      setError(message);
+    },
+  });
+
+  const { data: sessionsData } = useQuery({
+    queryKey: chatSessionsQueryKey(transcriptionId),
+    queryFn: () => fetchChatSessions(transcriptionId),
+    enabled: !!transcriptionId,
+    onError: err => {
+      const message = err instanceof ApiError ? err.message : "Failed to load chat sessions";
+      setError(message);
+    },
+  });
+
+  const sessions = useMemo(() => sessionsData ?? [], [sessionsData]);
+
+  useEffect(() => {
+    if (activeSessionId) {
+      setInternalSessionId(activeSessionId);
+    }
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!activeSessionId && sessions.length > 0 && !internalSessionId) {
+      const firstId = sessions[0].id;
+      setInternalSessionId(firstId);
+      onSessionChange?.(firstId);
+    }
+  }, [sessions, activeSessionId, internalSessionId, onSessionChange]);
+
+  const effectiveSessionId = useMemo(() => {
+    if (activeSessionId) return activeSessionId;
+    if (internalSessionId) return internalSessionId;
+    return sessions[0]?.id ?? null;
+  }, [activeSessionId, internalSessionId, sessions]);
+
+  const activeSession = useMemo<ChatSessionSummary | null>(() => {
+    if (!effectiveSessionId) return null;
+    return sessions.find(s => s.id === effectiveSessionId) ?? null;
+  }, [sessions, effectiveSessionId]);
+
+  useEffect(() => {
+    setMessages([]);
+    setStreamingMessage("");
+  }, [effectiveSessionId]);
+
+  const { data: sessionDetail } = useQuery({
+    queryKey: chatSessionDetailQueryKey(effectiveSessionId ?? 'inactive'),
+    queryFn: () => fetchChatSessionDetail(effectiveSessionId as string),
+    enabled: !!effectiveSessionId,
+    onError: err => {
+      const message = err instanceof ApiError ? err.message : "Failed to load chat session";
+      setError(message);
+      setMessages([]);
+    },
+  });
+
+  useEffect(() => {
+    if (sessionDetail) {
+      setMessages(sessionDetail.messages ?? []);
+      setError(null);
+    }
+  }, [sessionDetail]);
 
   const scrollToBottom = useCallback(() => {
     const el = messagesContainerRef.current
@@ -79,128 +134,17 @@ export const ChatInterface = memo(function ChatInterface({ transcriptionId, acti
     }
   }, [messages, streamingMessage])
 
-  useEffect(() => {
-    if (transcriptionId) {
-      loadChatModels();
-    }
-  }, [transcriptionId]);
-
-  // Memoize load functions to prevent recreating on every render
-  const loadChatSession = useCallback(async (sessionId: string) => {
-    try {
-      setMessages([])
-      const response = await fetch(`/api/v1/chat/sessions/${sessionId}`, {
-        headers: getAuthHeaders(),
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || "Failed to load chat session");
-      }
-      
-      const data = await response.json();
-      setMessages(data.messages || []);
-    } catch (err: any) {
-      console.error("Error loading chat session:", err);
-      setError(err.message);
-      setMessages([]);
-    }
-  }, [getAuthHeaders]);
-
-  const loadChatSessions = useCallback(async () => {
-    try {
-      const response = await fetch(`/api/v1/chat/transcriptions/${transcriptionId}/sessions`, {
-        headers: getAuthHeaders(),
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || "Failed to load chat sessions");
-      }
-      
-      const data = await response.json();
-      setSessions(data || []);
-
-      // Determine active session: prefer prop, else most recent
-      if (data && data.length > 0) {
-        if (activeSessionId) {
-          const fromProp = data.find((s: ChatSession) => s.id === activeSessionId);
-          if (fromProp) {
-            setActiveSession(fromProp);
-            loadChatSession(fromProp.id);
-          }
-        } else if (!activeSession) {
-          setActiveSession(data[0]);
-          loadChatSession(data[0].id);
-          // If no sessionId in URL and consumer wants routing, inform
-          onSessionChange?.(data[0].id);
-        }
-      }
-    } catch (err: any) {
-      console.error("Error loading chat sessions:", err);
-      // Don't set error message for sessions if the main issue is OpenAI config
-      if (!err.message.includes("OpenAI")) {
-        setError(err.message);
-      }
-      setSessions([]);
-    }
-  }, [transcriptionId, getAuthHeaders, activeSessionId, activeSession, onSessionChange]);
-
-  // Respond to external sessionId changes (via router) - optimize to avoid unnecessary re-runs
-  useEffect(() => {
-    if (!activeSessionId) return;
-    if (activeSession?.id === activeSessionId) return;
-
-    const found = sessions.find(s => s.id === activeSessionId);
-    if (found) {
-      setActiveSession(found);
-      loadChatSession(found.id);
-    } else {
-      // Fallback: load the session directly and refresh sessions list
-      setActiveSession(null);
-      setMessages([]);
-      loadChatSession(activeSessionId);
-      loadChatSessions();
-    }
-  }, [activeSessionId, activeSession?.id]);
-
-  const loadChatModels = async () => {
-    try {
-      const response = await fetch("/api/v1/chat/models", {
-        headers: getAuthHeaders(),
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || "Failed to load models");
-      }
-      
-      const data = await response.json();
-      if (data.models && data.models.length > 0 && !selectedModel) {
-        setSelectedModel(data.models[0]);
-      }
-      setError(null);
-      
-      // Only load chat sessions if models loaded successfully
-      loadChatSessions();
-    } catch (err: any) {
-      console.error("Error loading chat models:", err);
-      setError(err.message);
-      setSessions([]);
-    }
-  };
-
-
   const sendMessage = async () => {
-    if (!activeSession || !inputMessage.trim() || isLoading) return;
+    const sessionId = activeSession?.id ?? effectiveSessionId;
+    if (!sessionId || !inputMessage.trim() || isLoading) return;
 
     const messageContent = inputMessage.trim();
+    const previousMessages = messages;
     setInputMessage("");
     setIsLoading(true);
     setError(null);
 
     try {
-      // Add user message to UI immediately
       const userMessage: ChatMessage = {
         id: Date.now(),
         role: "user",
@@ -209,10 +153,9 @@ export const ChatInterface = memo(function ChatInterface({ transcriptionId, acti
       };
       setMessages(prev => [...prev, userMessage]);
 
-      const response = await fetch(`/api/v1/chat/sessions/${activeSession.id}/messages`, {
+      const response = await fetch(`/api/v1/chat/sessions/${sessionId}/messages`, {
         method: "POST",
         headers: {
-          ...getAuthHeaders(),
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -221,11 +164,10 @@ export const ChatInterface = memo(function ChatInterface({ transcriptionId, acti
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || "Failed to send message");
+        const errorText = await response.text();
+        throw new Error(errorText || "Failed to send message");
       }
 
-      // Handle streaming response
       const reader = response.body?.getReader();
       if (!reader) throw new Error("No response body");
 
@@ -238,8 +180,7 @@ export const ChatInterface = memo(function ChatInterface({ transcriptionId, acti
         content: "",
         created_at: new Date().toISOString(),
       };
-      
-      // Use ref to track assistant message index to avoid recreating array
+
       let assistantMessageIndex = -1;
       setMessages(prev => {
         assistantMessageIndex = prev.length;
@@ -252,84 +193,78 @@ export const ChatInterface = memo(function ChatInterface({ transcriptionId, acti
 
         const chunk = new TextDecoder().decode(value);
         assistantContent += chunk;
-        
-        // Optimize by only updating the specific message index instead of mapping entire array
+
         setMessages(prev => {
-          const newMessages = [...prev];
-          if (assistantMessageIndex >= 0 && assistantMessageIndex < newMessages.length) {
-            newMessages[assistantMessageIndex] = { ...newMessages[assistantMessageIndex], content: assistantContent };
+          const updated = [...prev];
+          if (assistantMessageIndex >= 0 && assistantMessageIndex < updated.length) {
+            updated[assistantMessageIndex] = { ...updated[assistantMessageIndex], content: assistantContent };
           }
-          return newMessages;
+          return updated;
         });
       }
 
-      // Store the complete response before any potential session updates
-      const finalAssistantContent = assistantContent;
-      const finalMessages = [...messages, userMessage, { ...assistantMessage, content: finalAssistantContent }];
-      
-      // Auto-generate title after 2nd exchange (when we have 2 user messages and 2 assistant responses)
-      const userMessageCount = finalMessages.filter(msg => msg.role === 'user').length;
-      const assistantMessageCount = finalMessages.filter(msg => msg.role === 'assistant').length;
-      
-      // Only generate title after the 2nd complete exchange
+      const finalAssistantMessage: ChatMessage = { ...assistantMessage, content: assistantContent };
+      const finalMessages = [...previousMessages, userMessage, finalAssistantMessage];
+
+      const userMessageCount = finalMessages.filter(msg => msg.role === "user").length;
+      const assistantMessageCount = finalMessages.filter(msg => msg.role === "assistant").length;
+
       if (userMessageCount === 2 && assistantMessageCount === 2) {
-        // Wait a moment to ensure UI is updated, then generate title
         setTimeout(async () => {
-          const sid = activeSession?.id || activeSessionId;
-          if (sid) {
-            emitTitleGenerating({ sessionId: sid, isGenerating: true });
-            try {
-              const res = await fetch(`/api/v1/chat/sessions/${sid}/title/auto`, {
-                method: 'POST',
-                headers: { ...getAuthHeaders() }
-              });
-              
-              if (res.ok) {
-                const updated = await res.json();
-                setSessions(prev => prev.map(s => s.id === updated.id ? { ...s, title: updated.title } : s));
-                if ((activeSession && activeSession.id === updated.id) || (!activeSession && sid === updated.id)) {
-                  setActiveSession(prev => prev ? { ...prev, title: updated.title } as any : prev);
-                }
-                toast({ 
-                  title: '✨ Chat Renamed', 
-                  description: `Renamed to "${updated.title}"`
-                });
-                emitSessionTitleUpdated({ sessionId: updated.id, title: updated.title });
-              }
-            } catch (error) {
-              console.error('Error generating title:', error);
+          emitTitleGenerating({ sessionId, isGenerating: true });
+          try {
+            const res = await fetch(`/api/v1/chat/sessions/${sessionId}/title/auto`, {
+              method: 'POST',
+            });
+            if (res.ok) {
+              const updated = (await res.json()) as ChatSessionSummary;
+              queryClient.setQueryData(chatSessionsQueryKey(transcriptionId), (prev?: ChatSessionSummary[]) =>
+                prev ? prev.map(s => (s.id === updated.id ? { ...s, title: updated.title } : s)) : prev,
+              );
+              queryClient.setQueryData(chatSessionDetailQueryKey(updated.id), (prev?: ChatSessionDetail) =>
+                prev ? { ...prev, title: updated.title } : prev,
+              );
               toast({
-                title: 'Failed to generate title',
-                description: 'Could not auto-generate chat title'
+                title: '✨ Chat Renamed',
+                description: `Renamed to "${updated.title}"`,
               });
-            } finally {
-              emitTitleGenerating({ sessionId: sid, isGenerating: false });
+              emitSessionTitleUpdated({ sessionId: updated.id, title: updated.title });
             }
+          } catch (error) {
+            console.error('Error generating title:', error);
+            toast({
+              title: 'Failed to generate title',
+              description: 'Could not auto-generate chat title',
+            });
+          } finally {
+            emitTitleGenerating({ sessionId, isGenerating: false });
           }
-        }, 500); // Small delay to ensure message is fully processed
+        }, 500);
       }
 
-      // Update session metadata without full reload to prevent message loss
-      try {
-        const sid = activeSession?.id || activeSessionId;
-        if (sid) {
-          setSessions(prev => prev.map(s => 
-            s.id === sid 
-              ? { ...s, message_count: finalMessages.length, updated_at: new Date().toISOString() }
-              : s
-          ));
-        }
-      } catch (error) {
-        console.error('Error updating session metadata:', error);
-      }
+      queryClient.setQueryData(chatSessionsQueryKey(transcriptionId), (prev?: ChatSessionSummary[]) =>
+        prev
+          ? prev.map(s =>
+              s.id === sessionId
+                ? { ...s, message_count: finalMessages.length, updated_at: new Date().toISOString() }
+                : s,
+            )
+          : prev,
+      );
+      queryClient.setQueryData(chatSessionDetailQueryKey(sessionId), (prev?: ChatSessionDetail) =>
+        prev ? { ...prev, message_count: finalMessages.length } : prev,
+      );
     } catch (err: any) {
       console.error("Error sending message:", err);
       setError(err.message);
-      // Remove the user message from UI if there was an error
       setMessages(prev => prev.slice(0, -1));
     } finally {
       setIsLoading(false);
       setStreamingMessage("");
+      if (sessionId) {
+        await queryClient.invalidateQueries({ queryKey: chatSessionDetailQueryKey(sessionId) });
+        await queryClient.invalidateQueries({ queryKey: chatSessionsQueryKey(transcriptionId) });
+      }
     }
   };
 

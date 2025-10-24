@@ -1,12 +1,14 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Bot, Key, Globe, CheckCircle, AlertCircle } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
+import { ApiError, request } from "@/lib/api";
 
-interface LLMConfig {
+export interface LLMConfig {
 	id?: number;
 	provider: string;
 	base_url?: string;
@@ -16,82 +18,91 @@ interface LLMConfig {
 	updated_at?: string;
 }
 
+type SavePayload = {
+	provider: string;
+	is_active: boolean;
+	base_url?: string;
+	api_key?: string;
+}
+
+export const llmConfigQueryKey = ["llm-config"] as const;
+
+export async function fetchLlmConfig() {
+	try {
+		return await request<LLMConfig>("/api/v1/llm/config");
+	} catch (error) {
+		if (error instanceof ApiError && error.status === 404) {
+			return null;
+		}
+		throw error;
+	}
+}
+
+const defaultConfig: LLMConfig = {
+	provider: "ollama",
+	is_active: false,
+};
+
 export function LLMSettings() {
-	const [config, setConfig] = useState<LLMConfig>({
-		provider: "ollama",
-		is_active: false,
-	});
+	const [config, setConfig] = useState<LLMConfig>(defaultConfig);
 	const [baseUrl, setBaseUrl] = useState("");
 	const [apiKey, setApiKey] = useState("");
-	const [loading, setLoading] = useState(true);
-	const [saving, setSaving] = useState(false);
 	const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 	const { getAuthHeaders } = useAuth();
+	const queryClient = useQueryClient();
+
+	const { data, isPending, isError, error, refetch } = useQuery({
+		queryKey: llmConfigQueryKey,
+		queryFn: fetchLlmConfig,
+		retry: 1,
+	});
 
 	useEffect(() => {
-		fetchConfig();
-	}, []);
-
-	const fetchConfig = async () => {
-		try {
-			const response = await fetch("/api/v1/llm/config", {
-				headers: getAuthHeaders(),
-			});
-
-			if (response.ok) {
-				const data = await response.json();
-				setConfig(data);
-				setBaseUrl(data.base_url || "");
-				// Don't set API key from response for security
-			} else if (response.status !== 404) {
-				console.error("Failed to fetch LLM config");
-			}
-		} catch (error) {
-			console.error("Error fetching LLM config:", error);
-		} finally {
-			setLoading(false);
+		if (data) {
+			setConfig(data);
+			setBaseUrl(data.base_url || "");
+		} else {
+			setConfig(defaultConfig);
+			setBaseUrl("");
 		}
-	};
+	}, [data]);
 
-	const handleSave = async () => {
-		setSaving(true);
+	const saveMutation = useMutation({
+		mutationFn: (payload: SavePayload) =>
+			request<LLMConfig>("/api/v1/llm/config", {
+				method: "POST",
+				headers: getAuthHeaders(),
+				json: payload,
+			}),
+		onSuccess: (response, variables) => {
+			setConfig(response);
+			setBaseUrl(response.base_url || "");
+			if (variables.provider === "openai") {
+				setApiKey("");
+			}
+			setMessage({ type: "success", text: "LLM configuration saved successfully!" });
+			queryClient.setQueryData(llmConfigQueryKey, response);
+		},
+		onError: (err: unknown) => {
+			let text = "Failed to save configuration. Please try again.";
+			if (err instanceof ApiError) {
+				text = err.message;
+			}
+			setMessage({ type: "error", text });
+		},
+	});
+
+	const handleSave = () => {
 		setMessage(null);
 
-		const payload = {
+		const payload: SavePayload = {
 			provider: config.provider,
-			is_active: true, // Always set to active when saving
+			is_active: true,
 			...(config.provider === "ollama" && { base_url: baseUrl }),
 			...(config.provider === "openai" && { api_key: apiKey }),
 		};
 
-		try {
-			const response = await fetch("/api/v1/llm/config", {
-				method: "POST",
-				headers: {
-					...getAuthHeaders(),
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify(payload),
-			});
-
-			if (response.ok) {
-				const data = await response.json();
-				setConfig(data);
-				setMessage({ type: "success", text: "LLM configuration saved successfully!" });
-				// Clear the API key field after saving
-				if (config.provider === "openai") {
-					setApiKey("");
-				}
-			} else {
-				const errorData = await response.json();
-				setMessage({ type: "error", text: errorData.error || "Failed to save configuration" });
-			}
-		} catch (error) {
-			console.error("Error saving LLM config:", error);
-			setMessage({ type: "error", text: "Failed to save configuration. Please try again." });
-		} finally {
-			setSaving(false);
-		}
+		saveMutation.mutate(payload);
 	};
 
 	const isFormValid = () => {
@@ -104,10 +115,24 @@ export function LLMSettings() {
 		return false;
 	};
 
-	if (loading) {
+	if (isPending) {
 		return (
 			<div className="flex items-center justify-center h-32">
 				<div className="text-gray-500 dark:text-gray-400">Loading LLM configuration...</div>
+			</div>
+		);
+	}
+
+	if (isError) {
+		return (
+			<div className="flex flex-col items-center justify-center gap-4 rounded-lg border border-dashed border-gray-300 p-6 text-center text-sm text-gray-600 dark:border-gray-700 dark:text-gray-300">
+				<div>Failed to load LLM configuration.</div>
+				{error instanceof Error && (
+					<div className="text-xs text-gray-500 dark:text-gray-400">{error.message}</div>
+				)}
+				<Button variant="outline" onClick={() => refetch()}>
+					Retry
+				</Button>
 			</div>
 		);
 	}
@@ -141,7 +166,6 @@ export function LLMSettings() {
 				)}
 
 				<div className="space-y-6">
-					{/* Provider Selection */}
 					<div>
 						<Label className="text-base font-medium">Choose LLM Provider</Label>
 						<p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
@@ -208,7 +232,6 @@ export function LLMSettings() {
 						</div>
 					</div>
 
-					{/* Configuration Fields */}
 					<div className="space-y-4">
 						{config.provider === "ollama" && (
 							<div>
@@ -253,7 +276,6 @@ export function LLMSettings() {
 						)}
 					</div>
 
-					{/* Status */}
 					{config.id && (
 						<div className="bg-white dark:bg-gray-800 rounded-lg p-4 border">
 							<h4 className="font-medium text-gray-900 dark:text-gray-100 mb-2">Status</h4>
@@ -277,14 +299,13 @@ export function LLMSettings() {
 						</div>
 					)}
 
-					{/* Save Button */}
 					<div className="flex justify-end">
 						<Button
 							onClick={handleSave}
-							disabled={!isFormValid() || saving}
+							disabled={!isFormValid() || saveMutation.isPending}
 							className="bg-blue-600 hover:bg-blue-700 text-white"
 						>
-							{saving ? "Saving..." : "Save Configuration"}
+							{saveMutation.isPending ? "Saving..." : "Save Configuration"}
 						</Button>
 					</div>
 				</div>

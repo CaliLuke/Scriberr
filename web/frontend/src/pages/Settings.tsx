@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { User, Settings as SettingsIcon, Key, Bot, FileText, Plus } from "lucide-react";
 import {
 	Tabs,
@@ -10,38 +11,27 @@ import { Header } from "../components/Header";
 import { ProfileSettings } from "../components/ProfileSettings";
 import { AccountSettings } from "../components/AccountSettings";
 import { APIKeySettings } from "../components/APIKeySettings";
-import { LLMSettings } from "../components/LLMSettings";
+import { LLMSettings, fetchLlmConfig, llmConfigQueryKey } from "../components/LLMSettings";
 import { SummaryTemplateDialog, type SummaryTemplate } from "../components/SummaryTemplateDialog";
-import { SummaryTemplatesTable } from "../components/SummaryTemplatesTable";
-import { useAuth } from "../contexts/AuthContext";
+import { SummaryTemplatesTable, summaryTemplatesQueryKey } from "../components/SummaryTemplatesTable";
+import { request, ApiError } from "@/lib/api";
+import { useToast } from "@/components/ui/toast";
 
 export function Settings() {
-  const [activeTab, setActiveTab] = useState("transcription");
-  const { getAuthHeaders } = useAuth();
-  const [summaryDialogOpen, setSummaryDialogOpen] = useState(false);
-  const [editingSummary, setEditingSummary] = useState<SummaryTemplate | null>(null);
-  const [summaryRefresh, setSummaryRefresh] = useState(0);
-  const [llmConfigured, setLlmConfigured] = useState(false);
+	const [activeTab, setActiveTab] = useState("transcription");
+	const [summaryDialogOpen, setSummaryDialogOpen] = useState(false);
+	const [editingSummary, setEditingSummary] = useState<SummaryTemplate | null>(null);
+	const [summaryRefresh, setSummaryRefresh] = useState(0);
+	const queryClient = useQueryClient();
+	const { toast } = useToast();
 
-  // Fetch LLM config and models
-  useEffect(() => {
-    const fetchLLM = async () => {
-      try {
-        const cfgRes = await fetch('/api/v1/llm/config', { headers: { ...getAuthHeaders() }});
-        if (!cfgRes.ok) { setLlmConfigured(false); return; }
-        const cfg = await cfgRes.json();
-        setLlmConfigured(!!cfg && cfg.is_active);
-        // Set configured; models are chosen per-template in dialog now
-        if (cfg && cfg.is_active) {
-          setLlmConfigured(true);
-        }
-      } catch {
-        setLlmConfigured(false);
-      }
-    };
-    fetchLLM();
-  }, [activeTab, getAuthHeaders]);
+	const { data: llmConfig } = useQuery({
+		queryKey: llmConfigQueryKey,
+		queryFn: fetchLlmConfig,
+		staleTime: 1000 * 30,
+	});
 
+	const llmConfigured = !!llmConfig?.is_active;
 
 	// Dummy function for file select (Settings page doesn't upload files)
 	const handleFileSelect = () => {
@@ -165,22 +155,29 @@ export function Settings() {
               onOpenChange={(o) => { setSummaryDialogOpen(o); if (!o) setEditingSummary(null); }}
               initial={editingSummary}
               onSave={async (tpl) => {
-                const headers: HeadersInit = { 'Content-Type': 'application/json', ...getAuthHeaders() };
-                try {
-                  if (tpl.id) {
-                    await fetch(`/api/v1/summaries/${tpl.id}`, { method: 'PUT', headers, body: JSON.stringify({ name: tpl.name, description: tpl.description, model: tpl.model, prompt: tpl.prompt }) });
-                  } else {
-                    await fetch('/api/v1/summaries', { method: 'POST', headers, body: JSON.stringify({ name: tpl.name, description: tpl.description, model: tpl.model, prompt: tpl.prompt }) });
-                  }
-                } finally {
-                  // keep user on Summary tab and refresh the list without a full reload
-                  setSummaryDialogOpen(false);
-                  setEditingSummary(null);
-                  setSummaryRefresh((n) => n + 1);
-                }
+								try {
+									if (tpl.id) {
+										await request(`/api/v1/summaries/${tpl.id}`, {
+											method: 'PUT',
+											json: { name: tpl.name, description: tpl.description, model: tpl.model, prompt: tpl.prompt },
+										});
+									} else {
+										await request('/api/v1/summaries', {
+											method: 'POST',
+											json: { name: tpl.name, description: tpl.description, model: tpl.model, prompt: tpl.prompt },
+										});
+									}
+									queryClient.invalidateQueries({ queryKey: summaryTemplatesQueryKey });
+									setSummaryRefresh((n) => n + 1);
+									setSummaryDialogOpen(false);
+									setEditingSummary(null);
+								} catch (err) {
+									const description = err instanceof ApiError ? err.message : 'Failed to save template.';
+									toast({ title: 'Save failed', description });
+								}
               }}
             />
-          </TabsContent>
+         </TabsContent>
 					</Tabs>
 				</div>
 			</div>

@@ -15,8 +15,8 @@ This document outlines an incremental strategy to improve maintainability, perfo
 ## Phase 1 – TanStack Query Foundation
 
 - [x] Introduce `@tanstack/react-query` with a top-level `<QueryClientProvider>`; configure auth header injection via `fetch` wrapper.
-- [ ] Replace imperative `fetch` blocks in `ChatInterface`, `AudioFilesTable`, and settings pages with query/mutation hooks. Focus on read paths first, keeping mutations shape-identical to current API contracts.
-- [ ] Centralize API request utilities (`lib/api.ts`) using `fetchQuery` to remove duplicate error parsing and retries.
+- [ ] Replace imperative `fetch` blocks in `ChatInterface`, `AudioFilesTable`, and settings pages with query/mutation hooks. *(ChatInterface + settings refactored; AudioFilesTable still pending.)*
+- [x] Centralize API request utilities (`lib/api.ts`) using `fetchQuery` to remove duplicate error parsing and retries.
 - [ ] Add suspense-friendly loading states leveraging `useQuery` status instead of bespoke `useState` flags.
 
 ## Phase 2 – Component Architecture
