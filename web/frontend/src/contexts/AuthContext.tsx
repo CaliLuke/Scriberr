@@ -25,6 +25,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 	// Use refs to avoid re-creating intervals on every render
 	const tokenCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
 	const fetchWrapperSetupRef = useRef(false);
+	const latestTokenRef = useRef<string | null>(null);
 
 	// Memoize expensive token expiry check
 	const isTokenExpired = useCallback((tokenToCheck: string): boolean => {
@@ -58,6 +59,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
       window.dispatchEvent(new PopStateEvent('popstate', { state: { route: { path: 'home' } } as any }));
     }
   }, [token]);
+
+	const logoutRef = useRef(logout);
 
 	// Check registration status and load token on mount
 	useEffect(() => {
@@ -112,6 +115,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
 		setRequiresRegistration(false); // Clear registration requirement after successful login/registration
 	}, []);
 
+	useEffect(() => {
+		latestTokenRef.current = token;
+	}, [token]);
+
+	useEffect(() => {
+		logoutRef.current = logout;
+	}, [logout]);
+
 	// Helper: attempt to refresh JWT via cookie refresh token
 	const tryRefresh = useCallback(async (): Promise<string | null> => {
 		try {
@@ -134,23 +145,44 @@ export function AuthProvider({ children }: AuthProviderProps) {
 		if (!fetchWrapperSetupRef.current) {
 			const originalFetch = window.fetch.bind(window);
 
+			const withAuthHeader = (
+				input: RequestInfo | URL,
+				init: RequestInit | undefined,
+				authToken: string | null,
+				{ force }: { force: boolean } = { force: false }
+			): RequestInit | undefined => {
+				if (!authToken) {
+					return init;
+				}
+				const existingHeaders = init?.headers ?? (input instanceof Request ? input.headers : undefined);
+				const headers = new Headers(existingHeaders);
+
+				if (!force && headers.has('Authorization')) {
+					return init;
+				}
+
+				headers.set('Authorization', `Bearer ${authToken}`);
+				return {
+					...init,
+					headers,
+				};
+			};
+
 			const wrappedFetch: typeof window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 				try {
-					let res = await originalFetch(input, init);
+					const tokenForRequest = latestTokenRef.current;
+					const initialInit = withAuthHeader(input, init, tokenForRequest, { force: false });
+					let res = await originalFetch(input, initialInit);
 					if (res.status === 401) {
 						// Try silent refresh once
-						const newToken = await tryRefresh()
+						const newToken = await tryRefresh();
 						if (newToken) {
-							// Retry original request with updated Authorization header if provided
-							const newInit: RequestInit | undefined = init ? { ...init } : undefined
-							if (newInit?.headers && typeof newInit.headers === 'object') {
-								(newInit.headers as any)['Authorization'] = `Bearer ${newToken}`
-							}
-							res = await originalFetch(input, newInit)
-							if (res.status !== 401) return res
+							const retryInit = withAuthHeader(input, init, newToken, { force: true });
+							res = await originalFetch(input, retryInit);
+							if (res.status !== 401) return res;
 						}
 						// Still unauthorized: force logout
-						logout()
+						logoutRef.current?.();
 					}
 					return res;
 				} catch (err) {

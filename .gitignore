@@ -39,7 +39,9 @@ AGENTS.md
 scriberr-data
 whisperx-env
 
-internal/web
+internal/web/*
+!internal/web/static.go
+!internal/web/static_test.go
 env-data
 main
 results.json
